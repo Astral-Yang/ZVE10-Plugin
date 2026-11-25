@@ -16,7 +16,8 @@ extern "C" {
 typedef enum {
     ZVP_GATE_ALLOW = 0,
     ZVP_GATE_DISABLED_NO_CARD = 1,
-    ZVP_GATE_DISABLED_KILL_FILE = 2
+    ZVP_GATE_DISABLED_KILL_FILE = 2,
+    ZVP_GATE_DISABLED_UNINSTALL = 3
 } zvp_gate_status_t;
 
 typedef struct zvp_gate_ops {
@@ -108,6 +109,40 @@ void zvp_recovery_tick(zvp_recovery_ctx_t *rec, uint64_t now_ms);
 zvp_recovery_phase_t zvp_recovery_trigger(zvp_recovery_ctx_t *rec,
                                           zvp_wifi5g_ctx_t *wifi,
                                           uint64_t now_ms);
+
+/* 按备份的原厂参数还原 Sony Backup (GO/STA NVRAM、频段菜单、AP 频段) */
+int zvp_recovery_restore_backup_vals(const zvp_wifi5g_platform_ops_t *ops,
+                                     bool backup_initialized,
+                                     uint8_t orig_nvram_go,
+                                     uint8_t orig_nvram_sta,
+                                     uint8_t orig_band_menu,
+                                     const uint8_t orig_ap_ch_band[2]);
+
+/* 开机 Boot-Loop 防重启看门狗：连续崩溃 >= max_fails 次后自动还原 mode3 并清 preload */
+typedef struct zvp_boot_guard_ops {
+    int (*read_file)(const char *path, void *buf, size_t cap, size_t *out_len);
+    int (*write_file)(const char *path, const void *buf, size_t len);
+    int (*unlink_file)(const char *path);
+} zvp_boot_guard_ops_t;
+
+typedef struct zvp_boot_guard_state {
+    uint32_t magic;
+    uint32_t version;
+    uint32_t fail_count;
+    uint32_t trip_count;
+} zvp_boot_guard_state_t;
+
+bool zvp_boot_guard_disable_preload(const zvp_boot_guard_ops_t *ops,
+                                    const char *dmode_path,
+                                    const char *preload_path);
+bool zvp_boot_guard_enter(const zvp_boot_guard_ops_t *ops,
+                          const char *guard_path,
+                          const char *dmode_path,
+                          const char *preload_path,
+                          uint32_t max_fails,
+                          zvp_boot_guard_state_t *out_state);
+void zvp_boot_guard_mark_healthy(const zvp_boot_guard_ops_t *ops,
+                                 const char *guard_path);
 
 /* ============================================================================
  * 4. C1 按键策略、触控隔离与 180° 翻转屏自适应 (zvp_input_hook.c)

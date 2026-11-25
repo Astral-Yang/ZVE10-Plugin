@@ -114,30 +114,11 @@ zvp_recovery_phase_t zvp_recovery_trigger(zvp_recovery_ctx_t *rec,
 
     /* 二次确认窗口内，执行内存补丁、Backup 与全量功能状态原子回滚 */
     int rc_mem = restore_bytes(wifi);
-    int rc_bk = 0;
+    int rc_bk = zvp_recovery_restore_backup_vals(
+        &wifi->ops, wifi->backup_initialized,
+        wifi->orig_nvram_go, wifi->orig_nvram_sta,
+        wifi->orig_band_menu, wifi->orig_ap_ch_band);
     int rc_extra = 0;
-
-    if (wifi->ops.backup_write) {
-        uint8_t orig_pair[2];
-        orig_pair[0] = ZVP_WIFI_BAND_24G;
-        orig_pair[1] = (wifi->backup_initialized &&
-                        wifi->orig_ap_ch_band[0] == ZVP_WIFI_BAND_24G &&
-                        wifi->orig_ap_ch_band[1] != 0x00u)
-                           ? wifi->orig_ap_ch_band[1]
-                           : ZVP_WIFI_CH_AUTO;
-        if (wifi->ops.backup_write(ZVP_BKID_SUBSYS_NET, ZVP_BKID_WIFI_AP_CH_BAND, orig_pair) < 0) {
-            rc_bk = -1;
-        }
-        if (wifi->ops.backup_write(ZVP_BKID_SUBSYS_NVRAM, ZVP_BKID_WIFI_NVRAM_GO, &wifi->orig_nvram_go) < 0) {
-            rc_bk = -1;
-        }
-        if (wifi->ops.backup_write(ZVP_BKID_SUBSYS_NVRAM, ZVP_BKID_WIFI_NVRAM_STA, &wifi->orig_nvram_sta) < 0) {
-            rc_bk = -1;
-        }
-        if (wifi->ops.backup_write(ZVP_BKID_SUBSYS_SYS, ZVP_BKID_WIFI_BAND_MENU, &wifi->orig_band_menu) < 0) {
-            rc_bk = -1;
-        }
-    }
 
     wifi->enabled = false;
     wifi->selected_channel = ZVP_WIFI_CH_AUTO;
@@ -160,4 +141,131 @@ zvp_recovery_phase_t zvp_recovery_trigger(zvp_recovery_ctx_t *rec,
     }
 
     return rec->phase;
+}
+
+int zvp_recovery_restore_backup_vals(const zvp_wifi5g_platform_ops_t *ops,
+                                     bool backup_initialized,
+                                     uint8_t orig_nvram_go,
+                                     uint8_t orig_nvram_sta,
+                                     uint8_t orig_band_menu,
+                                     const uint8_t orig_ap_ch_band[2])
+{
+    if (!ops || !ops->backup_write) {
+        return 0;
+    }
+    int rc_bk = 0;
+    uint8_t orig_pair[2];
+    orig_pair[0] = ZVP_WIFI_BAND_24G;
+    orig_pair[1] = (backup_initialized && orig_ap_ch_band &&
+                    orig_ap_ch_band[0] == ZVP_WIFI_BAND_24G &&
+                    orig_ap_ch_band[1] != 0x00u)
+                       ? orig_ap_ch_band[1]
+                       : ZVP_WIFI_CH_AUTO;
+    uint8_t nv_go = (orig_nvram_go >= 1u && orig_nvram_go <= 26u) ? orig_nvram_go : 0x09u;
+    uint8_t nv_sta = (orig_nvram_sta >= 1u && orig_nvram_sta <= 26u) ? orig_nvram_sta : 0x09u;
+    uint8_t bmenu = orig_band_menu ? 1u : 0u;
+
+    if (ops->backup_write(ZVP_BKID_SUBSYS_NET, ZVP_BKID_WIFI_AP_CH_BAND, orig_pair) < 0) {
+        rc_bk = -1;
+    }
+    if (ops->backup_write(ZVP_BKID_SUBSYS_NVRAM, ZVP_BKID_WIFI_NVRAM_GO, &nv_go) < 0) {
+        rc_bk = -1;
+    }
+    if (ops->backup_write(ZVP_BKID_SUBSYS_NVRAM, ZVP_BKID_WIFI_NVRAM_STA, &nv_sta) < 0) {
+        rc_bk = -1;
+    }
+    if (ops->backup_write(ZVP_BKID_SUBSYS_SYS, ZVP_BKID_WIFI_BAND_MENU, &bmenu) < 0) {
+        rc_bk = -1;
+    }
+    return rc_bk;
+}
+
+#define ZVP_BOOT_GUARD_MAGIC   0x5A564247u
+#define ZVP_BOOT_GUARD_VERSION 1u
+
+static void load_boot_guard_state(const zvp_boot_guard_ops_t *ops,
+                                  const char *guard_path,
+                                  zvp_boot_guard_state_t *st)
+{
+    memset(st, 0, sizeof(*st));
+    st->magic = ZVP_BOOT_GUARD_MAGIC;
+    st->version = ZVP_BOOT_GUARD_VERSION;
+    if (!ops || !ops->read_file || !guard_path) {
+        return;
+    }
+    zvp_boot_guard_state_t disk;
+    size_t got = 0u;
+    if (ops->read_file(guard_path, &disk, sizeof(disk), &got) == 0 &&
+        got == sizeof(disk) &&
+        disk.magic == ZVP_BOOT_GUARD_MAGIC &&
+        disk.version == ZVP_BOOT_GUARD_VERSION) {
+        *st = disk;
+    }
+}
+
+bool zvp_boot_guard_disable_preload(const zvp_boot_guard_ops_t *ops,
+                                    const char *dmode_path,
+                                    const char *preload_path)
+{
+    if (!ops || !ops->write_file) {
+        return false;
+    }
+    bool ok = true;
+    if (dmode_path && dmode_path[0]) {
+        if (ops->write_file(dmode_path, "3\n", 2u) != 0) {
+            ok = false;
+        }
+    }
+    if (preload_path && preload_path[0]) {
+        if (ops->write_file(preload_path, "\n", 1u) != 0) {
+            ok = false;
+        }
+    }
+    return ok;
+}
+
+bool zvp_boot_guard_enter(const zvp_boot_guard_ops_t *ops,
+                          const char *guard_path,
+                          const char *dmode_path,
+                          const char *preload_path,
+                          uint32_t max_fails,
+                          zvp_boot_guard_state_t *out_state)
+{
+    zvp_boot_guard_state_t st;
+    load_boot_guard_state(ops, guard_path, &st);
+    if (max_fails == 0u) {
+        max_fails = 2u;
+    }
+
+    bool tripped = false;
+    if (st.fail_count >= max_fails) {
+        tripped = true;
+        (void)zvp_boot_guard_disable_preload(ops, dmode_path, preload_path);
+        st.fail_count = 0u;
+        st.trip_count++;
+    } else {
+        st.fail_count++;
+    }
+
+    if (ops && ops->write_file && guard_path) {
+        (void)ops->write_file(guard_path, &st, sizeof(st));
+    }
+    if (out_state) {
+        *out_state = st;
+    }
+    return tripped;
+}
+
+void zvp_boot_guard_mark_healthy(const zvp_boot_guard_ops_t *ops,
+                                 const char *guard_path)
+{
+    if (!ops || !ops->write_file || !guard_path) {
+        return;
+    }
+    zvp_boot_guard_state_t st;
+    load_boot_guard_state(ops, guard_path, &st);
+    if (st.fail_count != 0u) {
+        st.fail_count = 0u;
+        (void)ops->write_file(guard_path, &st, sizeof(st));
+    }
 }

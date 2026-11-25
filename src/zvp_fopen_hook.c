@@ -14,6 +14,7 @@ extern void zvp_logf(const char *fmt, ...);
 
 extern bool zvp_sound_has_active_remap(void);
 extern const char *zvp_sound_remap_fopen_path(const char *path);
+extern bool zvp_runtime_is_bypassed(void);
 
 /* 不包含 <stdio.h>，避免 glibc 的 __REDIRECT 将 fopen 改名为 fopen64 */
 typedef void *(*zvp_fn_fopen_t)(const char *path, const char *mode);
@@ -97,6 +98,9 @@ void *fopen(const char *path, const char *mode)
 {
     static zvp_fn_fopen_t real_fn = NULL;
     zvp_fn_fopen_t fn = resolve_next_fopen(&real_fn, "fopen");
+    if (zvp_runtime_is_bypassed()) {
+        return fn ? fn(path, mode) : NULL;
+    }
     bool remap = zvp_sound_has_active_remap();
     const char *actual = remap ? zvp_sound_remap_fopen_path(path) : path;
     void *fp = fn ? fn(actual, mode) : NULL;
@@ -111,6 +115,9 @@ void *fopen64(const char *path, const char *mode)
 {
     static zvp_fn_fopen_t real_fn = NULL;
     zvp_fn_fopen_t fn = resolve_next_fopen(&real_fn, "fopen64");
+    if (zvp_runtime_is_bypassed()) {
+        return fn ? fn(path, mode) : NULL;
+    }
     bool remap = zvp_sound_has_active_remap();
     const char *actual = remap ? zvp_sound_remap_fopen_path(path) : path;
     void *fp = fn ? fn(actual, mode) : NULL;
@@ -188,6 +195,9 @@ int _ZN11ObjAvbbcCmn10OsalSndMsgEjPKhj(void *self, unsigned int msg_id,
         if (fn) {
             __atomic_store_n(&real_fn, fn, __ATOMIC_RELEASE);
         }
+    }
+    if (zvp_runtime_is_bypassed()) {
+        return fn ? fn(self, msg_id, data, len) : -1;
     }
 
     unsigned char patched[16];

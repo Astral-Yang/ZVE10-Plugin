@@ -170,11 +170,13 @@ static int plat_write_mem(uintptr_t addr, const void *buf, size_t len)
  * Sony libbackup / libInfraFsys 平台适配层
  * ========================================================================== */
 
-static zvp_fn_backup_read_t  s_backup_read  = NULL;
-static zvp_fn_backup_write_t s_backup_write = NULL;
-static zvp_fn_fsys_mounts_t  s_fsys_mounts  = NULL;
-static zvp_fn_fsys_open_t    s_fsys_open    = NULL;
-static zvp_fn_fsys_close_t   s_fsys_close   = NULL;
+static zvp_fn_backup_read_t      s_backup_read      = NULL;
+static zvp_fn_backup_write_t     s_backup_write     = NULL;
+static zvp_fn_fsys_mounts_t      s_fsys_mounts      = NULL;
+static zvp_fn_fsys_open_t        s_fsys_open        = NULL;
+static zvp_fn_fsys_close_t       s_fsys_close       = NULL;
+typedef int (*zvp_fn_fsys_find_first_t)(const char *pattern, uint32_t attr_mask, void *find_info);
+static zvp_fn_fsys_find_first_t  s_fsys_find_first  = NULL;
 
 static int plat_backup_read(uint32_t bkid, void *buf)
 {
@@ -210,23 +212,26 @@ static uint32_t plat_get_mount_drives(void)
     int fd = open("/mnt/sd", O_RDONLY);
     if (fd >= 0) {
         close(fd);
-        return ZVP_FSYS_DRIVE_A_BIT;
+        return ZVP_FSYS_DRIVE_B_BIT;
     }
     return 0;
 }
 
 static int plat_file_exists(const char *path)
 {
-    if (!path) {
+    if (!path || !path[0]) {
         return 0;
     }
-    /* PrFILE2 路径 ("A:/...") 优先走 Sony Fsys_Open */
-    if (strncmp(path, "A:/", 3) == 0) {
+    /* 任意 PrFILE2 盘符路径 ("A:/" .. "Z:/") 均走 Sony Fsys_Open / Fsys_FindFirst */
+    if ((path[0] >= 'A' && path[0] <= 'Z') && path[1] == ':' && path[2] == '/') {
         if (!s_fsys_open) {
             s_fsys_open = (zvp_fn_fsys_open_t)dlsym(RTLD_DEFAULT, "Fsys_Open");
         }
         if (!s_fsys_close) {
             s_fsys_close = (zvp_fn_fsys_close_t)dlsym(RTLD_DEFAULT, "Fsys_Close");
+        }
+        if (!s_fsys_find_first) {
+            s_fsys_find_first = (zvp_fn_fsys_find_first_t)dlsym(RTLD_DEFAULT, "Fsys_FindFirst");
         }
         if (s_fsys_open && s_fsys_close) {
             int handle = -1;
@@ -235,8 +240,18 @@ static int plat_file_exists(const char *path)
                 s_fsys_close(handle);
                 return 1;
             }
-            return 0;
         }
+        if (s_fsys_find_first) {
+            uint8_t *fi = (uint8_t *)calloc(1u, 2088u);
+            if (fi) {
+                int frc = s_fsys_find_first(path, 0x80u, fi);
+                free(fi);
+                if (frc == 0) {
+                    return 1;
+                }
+            }
+        }
+        return 0;
     }
     int fd = open(path, O_RDONLY);
     if (fd >= 0) {

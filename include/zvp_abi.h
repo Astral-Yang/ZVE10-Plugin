@@ -62,11 +62,24 @@ static const uint8_t ZVP_PATCH_ISVALID_5GHZ[4] = { 0x01u, 0x20u, 0x70u, 0x47u };
 /* CreateImageParam 像素格式：7 = RGBA4444 (4-4-4-4 带 Alpha 透明通道) */
 #define ZVP_PIXEL_FMT_RGBA4444       7
 
-/* PrFILE2 / libInfraFsys.so Drive A (SD 卡) 盘符掩码与禁用门禁文件 */
+/* PrFILE2 / libInfraFsys.so 盘符掩码与禁用门禁文件
+ * 注意：ZV-E10 真机上 A: (bit 0) 为机内虚拟 INFO/LICENSE 盘（无论是否插卡均存在），
+ *       物理 SD 卡槽为 B: (bit 1 = 0x02)。 */
 #define ZVP_FSYS_DRIVE_A_BIT         0x01u
-#define ZVP_GATE_DISABLE_PATH_FSYS   "A:/ZVP_OFF"
+#define ZVP_FSYS_DRIVE_B_BIT         0x02u
+#define ZVP_FSYS_DRIVE_SD_MASK       0x02u
+#define ZVP_GATE_DISABLE_FILE_NAME   "ZVP_OFF"
+#define ZVP_GATE_UNINSTALL_NAME      "ZVP_UNINSTALL"
+#define ZVP_GATE_DISABLE_PATH_FSYS   "B:/ZVP_OFF"
 #define ZVP_GATE_DISABLE_PATH_POSIX1 "/mnt/sd/ZVP_OFF"
 #define ZVP_GATE_DISABLE_PATH_POSIX2 "/tmp/ZVP_OFF"
+
+/* 启动看门狗自熔断与持久化启动模式文件 */
+#define ZVP_BOOT_GUARD_PATH          "/tmp/zvp_boot_guard"
+#define ZVP_MODE_DMODE_PATH          "/setting/mode/dmode"
+#define ZVP_MODE_PRELOAD_PATH        "/setting/mode/preload"
+#define ZVP_BOOT_GUARD_MAX_FAILS     2u
+#define ZVP_BOOT_GUARD_HEALTHY_MS    5000u
 
 /* ============================================================================
  * Sony _InfraInputEvent 结构体布局（实机与 touch_bridge.c 一致，24 字节）

@@ -27,11 +27,17 @@ static uint8_t g_mock_bk_band_menu = 0x00u;
 static int g_mock_backup_write_count = 0;
 static int g_mock_bk_5g_enable_write_count = 0;
 
+static const char *g_mock_kill_path = NULL;
+
 static uint32_t mock_get_mounts(void) { return g_mock_mounts; }
 static int mock_file_exists(const char *path)
 {
     if (!path) return 0;
-    if (strcmp(path, ZVP_GATE_DISABLE_PATH_FSYS) == 0 && g_mock_zvp_off_exists) {
+    if (!g_mock_zvp_off_exists) {
+        return 0;
+    }
+    const char *target = g_mock_kill_path ? g_mock_kill_path : ZVP_GATE_DISABLE_PATH_FSYS;
+    if (strcmp(path, target) == 0) {
         return 1;
     }
     return 0;
@@ -136,6 +142,7 @@ static void reset_mocks(void)
 {
     g_mock_mounts = 0;
     g_mock_zvp_off_exists = false;
+    g_mock_kill_path = NULL;
     g_mock_sleep_calls = 0;
     g_mock_netsvc_loaded = true;
     g_mock_caution_loaded = true;
@@ -159,21 +166,36 @@ static void test_gate_logic(void)
 {
     zvp_gate_ops_t ops = { mock_get_mounts, mock_file_exists, mock_sleep };
 
-    /* 1. 未插卡应静默禁用 */
+    /* 1. 仅存在机内虚拟 A: 盘 (bit 0) 模拟未插 SD 卡，应静默禁用 */
     reset_mocks();
-    g_mock_mounts = 0;
+    g_mock_mounts = ZVP_FSYS_DRIVE_A_BIT;
     assert(zvp_gate_evaluate_boot(&ops, 300, 100) == ZVP_GATE_DISABLED_NO_CARD);
     assert(g_mock_sleep_calls == 3);
 
-    /* 2. 有卡但存在 A:/ZVP_OFF 应熔断禁用 */
+    /* 2. 有 SD 卡 (B: bit 1) 但存在 B:/ZVP_OFF 应熔断禁用 */
     reset_mocks();
-    g_mock_mounts = ZVP_FSYS_DRIVE_A_BIT;
+    g_mock_mounts = ZVP_FSYS_DRIVE_A_BIT | ZVP_FSYS_DRIVE_B_BIT;
     g_mock_zvp_off_exists = true;
+    g_mock_kill_path = "B:/ZVP_OFF";
     assert(zvp_gate_evaluate_boot(&ops, 300, 100) == ZVP_GATE_DISABLED_KILL_FILE);
 
-    /* 3. 有卡且无禁用文件应允许加载 */
+    /* 3. 兼容 Windows 新建空文件误存为 B:/ZVP_OFF.TXT 时同样应熔断禁用 */
     reset_mocks();
-    g_mock_mounts = ZVP_FSYS_DRIVE_A_BIT;
+    g_mock_mounts = ZVP_FSYS_DRIVE_A_BIT | ZVP_FSYS_DRIVE_B_BIT;
+    g_mock_zvp_off_exists = true;
+    g_mock_kill_path = "B:/ZVP_OFF.TXT";
+    assert(zvp_gate_evaluate_boot(&ops, 300, 100) == ZVP_GATE_DISABLED_KILL_FILE);
+
+    /* 4. 存在 ZVP_UNINSTALL 时应优先判定彻底卸载模式 */
+    reset_mocks();
+    g_mock_mounts = ZVP_FSYS_DRIVE_A_BIT | ZVP_FSYS_DRIVE_B_BIT;
+    g_mock_zvp_off_exists = true;
+    g_mock_kill_path = "B:/ZVP_UNINSTALL";
+    assert(zvp_gate_evaluate_boot(&ops, 300, 100) == ZVP_GATE_DISABLED_UNINSTALL);
+
+    /* 5. 有 SD 卡 (A: + B:) 且无禁用文件应允许加载 */
+    reset_mocks();
+    g_mock_mounts = ZVP_FSYS_DRIVE_A_BIT | ZVP_FSYS_DRIVE_B_BIT;
     g_mock_zvp_off_exists = false;
     assert(zvp_gate_evaluate_boot(&ops, 300, 100) == ZVP_GATE_ALLOW);
 }
@@ -667,6 +689,93 @@ static void test_full_recovery_callback(void)
     assert(wifi.state == ZVP_PATCH_IDLE);
 }
 
+static uint8_t g_bg_guard_buf[64];
+static size_t  g_bg_guard_len = 0u;
+static char    g_bg_dmode[16] = "3p\n";
+static char    g_bg_preload[128] = "/usr/tool/libmcheckb.so:/tmp/libzve10plugin.so";
+
+static int mock_bg_read(const char *path, void *buf, size_t cap, size_t *out_len)
+{
+    if (strcmp(path, "mock_guard") == 0 && g_bg_guard_len > 0u) {
+        size_t n = (g_bg_guard_len < cap) ? g_bg_guard_len : cap;
+        memcpy(buf, g_bg_guard_buf, n);
+        if (out_len) *out_len = n;
+        return 0;
+    }
+    return -1;
+}
+
+static int mock_bg_write(const char *path, const void *buf, size_t len)
+{
+    if (strcmp(path, "mock_guard") == 0 && len <= sizeof(g_bg_guard_buf)) {
+        memcpy(g_bg_guard_buf, buf, len);
+        g_bg_guard_len = len;
+        return 0;
+    }
+    if (strcmp(path, "mock_dmode") == 0 && len < sizeof(g_bg_dmode)) {
+        memcpy(g_bg_dmode, buf, len);
+        g_bg_dmode[len] = '\0';
+        return 0;
+    }
+    if (strcmp(path, "mock_preload") == 0 && len < sizeof(g_bg_preload)) {
+        memcpy(g_bg_preload, buf, len);
+        g_bg_preload[len] = '\0';
+        return 0;
+    }
+    return -1;
+}
+
+static int mock_bg_unlink(const char *path)
+{
+    if (strcmp(path, "mock_guard") == 0) {
+        g_bg_guard_len = 0u;
+        return 0;
+    }
+    return -1;
+}
+
+static void test_boot_guard_and_backup_rollback(void)
+{
+    zvp_boot_guard_ops_t bg_ops = { mock_bg_read, mock_bg_write, mock_bg_unlink };
+    zvp_boot_guard_state_t st;
+
+    /* 1. 正常启动并在存活后清零：连续反复启动也不会触发熔断 */
+    g_bg_guard_len = 0u;
+    snprintf(g_bg_dmode, sizeof(g_bg_dmode), "3p\n");
+    snprintf(g_bg_preload, sizeof(g_bg_preload), "/usr/tool/libmcheckb.so:/tmp/libzve10plugin.so");
+    for (int i = 0; i < 4; i++) {
+        assert(!zvp_boot_guard_enter(&bg_ops, "mock_guard", "mock_dmode", "mock_preload", 2u, &st));
+        assert(st.fail_count == 1u && st.trip_count == 0u);
+        zvp_boot_guard_mark_healthy(&bg_ops, "mock_guard");
+    }
+    assert(strcmp(g_bg_dmode, "3p\n") == 0);
+
+    /* 2. 连续两次未完成健康清零（模拟开机崩溃/卡死重启），第 3 次必须自动熔断清 preload */
+    assert(!zvp_boot_guard_enter(&bg_ops, "mock_guard", "mock_dmode", "mock_preload", 2u, &st));
+    assert(st.fail_count == 1u);
+    assert(!zvp_boot_guard_enter(&bg_ops, "mock_guard", "mock_dmode", "mock_preload", 2u, &st));
+    assert(st.fail_count == 2u);
+    assert(zvp_boot_guard_enter(&bg_ops, "mock_guard", "mock_dmode", "mock_preload", 2u, &st));
+    assert(st.fail_count == 0u && st.trip_count == 1u);
+    assert(strcmp(g_bg_dmode, "3\n") == 0);
+    assert(strcmp(g_bg_preload, "\n") == 0);
+
+    /* 3. 验证门禁还原 Backup 共用 helper 准确写回原厂 2.4GHz 与 NVRAM 参数 */
+    reset_mocks();
+    zvp_wifi5g_platform_ops_t pops = {
+        mock_find_base, mock_read_mem, mock_write_mem, mock_backup_read, mock_backup_write
+    };
+    g_mock_bk_ap_pair[0] = ZVP_WIFI_BAND_5G;
+    g_mock_bk_ap_pair[1] = 149u;
+    g_mock_bk_nvram_go = ZVP_WIFI_NVRAM_CN_GO;
+    g_mock_bk_nvram_sta = ZVP_WIFI_NVRAM_CN_STA;
+    g_mock_bk_band_menu = 1u;
+    uint8_t orig_pair[2] = { ZVP_WIFI_BAND_24G, 6u };
+    assert(zvp_recovery_restore_backup_vals(&pops, true, 0x09u, 0x09u, 0x00u, orig_pair) == 0);
+    assert(g_mock_bk_ap_pair[0] == ZVP_WIFI_BAND_24G && g_mock_bk_ap_pair[1] == 6u);
+    assert(g_mock_bk_nvram_go == 0x09u && g_mock_bk_nvram_sta == 0x09u && g_mock_bk_band_menu == 0u);
+}
+
 int main(void)
 {
     test_gate_logic();
@@ -677,6 +786,7 @@ int main(void)
     test_mini_widget_touch_isolation();
     test_sound_wav_and_f0_conversion();
     test_full_recovery_callback();
+    test_boot_guard_and_backup_rollback();
     printf("[通过] zvp 全部核心逻辑单元测试通过！\n");
     return 0;
 }

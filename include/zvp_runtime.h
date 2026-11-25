@@ -185,9 +185,12 @@ typedef struct zvp_keylog_sample {
 
 typedef struct zvp_runtime {
     bool boot_evaluated;
+    bool boot_tripped;
+    bool guard_cleared;
     bool plugin_active;
     bool shutting_down;
     uint64_t boot_start_ms;
+    uint64_t active_since_ms;
     uint64_t last_anim_ms;
     long ui_tid;
     zvp_gate_status_t gate_status;
@@ -221,6 +224,7 @@ typedef struct zvp_runtime {
 } zvp_runtime_t;
 
 zvp_runtime_t *zvp_runtime_get(void);
+bool zvp_runtime_is_bypassed(void);
 void zvp_runtime_save_prefs(void);
 void zvp_runtime_reset_prefs(void);
 void zvp_runtime_ui_frame_tick(void);

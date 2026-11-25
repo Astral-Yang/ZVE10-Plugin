@@ -52,6 +52,62 @@ zvp_runtime_t *zvp_runtime_get(void)
     return &g_rt;
 }
 
+static inline bool should_bypass_all(void)
+{
+    return g_rt.boot_tripped || (g_rt.boot_evaluated && !g_rt.plugin_active);
+}
+
+bool zvp_runtime_is_bypassed(void)
+{
+    return should_bypass_all();
+}
+
+static int plat_bg_read_file(const char *path, void *buf, size_t cap, size_t *out_len)
+{
+    if (!path || !buf || cap == 0u) {
+        return -1;
+    }
+    int fd = open(path, O_RDONLY);
+    if (fd < 0) {
+        return -1;
+    }
+    ssize_t n = read(fd, buf, cap);
+    close(fd);
+    if (n < 0) {
+        return -1;
+    }
+    if (out_len) {
+        *out_len = (size_t)n;
+    }
+    return 0;
+}
+
+static int plat_bg_write_file(const char *path, const void *buf, size_t len)
+{
+    if (!path || (!buf && len > 0u)) {
+        return -1;
+    }
+    int fd = open(path, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+    if (fd < 0) {
+        return -1;
+    }
+    ssize_t wr = (len > 0u) ? write(fd, buf, len) : 0;
+    (void)fsync(fd);
+    close(fd);
+    return (wr == (ssize_t)len) ? 0 : -1;
+}
+
+static int plat_bg_unlink_file(const char *path)
+{
+    return path ? unlink(path) : -1;
+}
+
+static const zvp_boot_guard_ops_t s_bg_ops = {
+    plat_bg_read_file,
+    plat_bg_write_file,
+    plat_bg_unlink_file
+};
+
 #define ZVP_PREFS_PATH       "/tmp/zvp_prefs.bin"
 #define ZVP_PREFS_MAGIC      0x5A565031u
 #define ZVP_PREFS_VERSION_V1 1u
@@ -203,6 +259,54 @@ static void load_prefs_and_apply(void)
     }
 }
 
+static void rollback_state_on_gate_block(zvp_gate_status_t st,
+                                         const zvp_wifi5g_platform_ops_t *wops)
+{
+    zvp_prefs_disk_t cfg;
+    memset(&cfg, 0, sizeof(cfg));
+    int fd = open(ZVP_PREFS_PATH, O_RDONLY);
+    bool has_cfg = false;
+    if (fd >= 0) {
+        ssize_t n = read(fd, &cfg, sizeof(cfg));
+        close(fd);
+        if (n >= (ssize_t)sizeof(zvp_prefs_disk_v1_t) &&
+            cfg.magic == ZVP_PREFS_MAGIC &&
+            (cfg.version == ZVP_PREFS_VERSION_V1 ||
+             (cfg.version == ZVP_PREFS_VERSION && n == (ssize_t)sizeof(cfg)))) {
+            has_cfg = true;
+        }
+    }
+
+    int bk_rc = 0;
+    if (has_cfg && (cfg.orig_saved || cfg.wifi5g_enabled)) {
+        bk_rc = zvp_recovery_restore_backup_vals(
+            wops, cfg.orig_saved != 0u,
+            cfg.orig_nvram_go, cfg.orig_nvram_sta,
+            cfg.orig_band_menu, cfg.orig_ap_ch_band);
+        zvp_logf("门禁自恢复 Backup: wifi5g=%u orig_saved=%u rc=%d",
+                 (unsigned)cfg.wifi5g_enabled, (unsigned)cfg.orig_saved, bk_rc);
+    }
+
+    if (st == ZVP_GATE_DISABLED_NO_CARD) {
+        /* 拔卡时仅把持久化开关置回 0 防止污染，但保留原厂备份与音效选择 */
+        if (has_cfg && cfg.wifi5g_enabled != 0u) {
+            cfg.wifi5g_enabled = 0u;
+            size_t wr_len = (cfg.version == ZVP_PREFS_VERSION_V1)
+                                ? sizeof(zvp_prefs_disk_v1_t)
+                                : sizeof(cfg);
+            (void)plat_bg_write_file(ZVP_PREFS_PATH, &cfg, wr_len);
+        }
+    } else if (st == ZVP_GATE_DISABLED_KILL_FILE) {
+        zvp_runtime_reset_prefs();
+    } else if (st == ZVP_GATE_DISABLED_UNINSTALL) {
+        zvp_runtime_reset_prefs();
+        bool un_ok = zvp_boot_guard_disable_preload(
+            &s_bg_ops, ZVP_MODE_DMODE_PATH, ZVP_MODE_PRELOAD_PATH);
+        (void)unlink(ZVP_BOOT_GUARD_PATH);
+        zvp_logf("ZVP_UNINSTALL 一键卸载: ok=%d (已还原 dmode=3 与 preload 空)", un_ok ? 1 : 0);
+    }
+}
+
 /* 仅在 UI 主线程执行非阻塞开机卡控门禁评估，严禁 usleep 卡死系统 */
 static void ensure_boot_evaluated_ui_thread(uint64_t now)
 {
@@ -225,8 +329,9 @@ static void ensure_boot_evaluated_ui_thread(uint64_t now)
     s_last_gate_poll_ms = now;
 
     zvp_gate_status_t st = zvp_gate_evaluate_boot(&gops, 0u, 0u);
+    uint32_t cur_drives = gops.get_mount_drives ? gops.get_mount_drives() : 0u;
     if (st == ZVP_GATE_DISABLED_NO_CARD && (now - g_rt.boot_start_ms) < 20000u) {
-        /* 实测 ZV-E10 Fsys 在开机约 11.5s 挂载 A: 卡，最多非阻塞等待 20s */
+        /* 实测 ZV-E10 Fsys 在开机约 11.5s 挂载 B: SD 卡，最多非阻塞等待 20s */
         return;
     }
 
@@ -236,10 +341,19 @@ static void ensure_boot_evaluated_ui_thread(uint64_t now)
     if (st != ZVP_GATE_ALLOW) {
         g_rt.plugin_active = false;
         zvp_bridge_stop_ticker(&g_rt.bridge);
-        zvp_logf("卡控门禁拦截启动: %s (保持纯原厂运行)",
-                 zvp_gate_status_str(st));
+        rollback_state_on_gate_block(st, &wops);
+        if (st != ZVP_GATE_DISABLED_UNINSTALL) {
+            zvp_boot_guard_mark_healthy(&s_bg_ops, ZVP_BOOT_GUARD_PATH);
+        }
+        g_rt.guard_cleared = true;
+        zvp_logf("卡控门禁拦截启动: %s drives=0x%x elapsed=%llums (保持纯原厂运行)",
+                 zvp_gate_status_str(st), (unsigned)cur_drives,
+                 (unsigned long long)(now - g_rt.boot_start_ms));
         return;
     }
+    zvp_logf("卡控门禁放行: %s drives=0x%x elapsed=%llums",
+             zvp_gate_status_str(st), (unsigned)cur_drives,
+             (unsigned long long)(now - g_rt.boot_start_ms));
 
     /* 允许通过环境变量 ZVP_C1_KEY 覆盖默认 C1 键码以便探针/调试 */
     uint32_t c1_code = ZVP_KEY_C1_DEFAULT;
@@ -261,6 +375,7 @@ static void ensure_boot_evaluated_ui_thread(uint64_t now)
     zvp_bridge_ensure_canvas(&g_rt.bridge);
 
     __sync_synchronize();
+    g_rt.active_since_ms = now;
     g_rt.plugin_active = true;
     if (g_rt.mini_widget_enabled) {
         zvp_ui_sync_overlay(&g_rt.ui);
@@ -275,6 +390,31 @@ static void zvp_on_preload_init(void)
 {
     memset(&g_rt, 0, sizeof(g_rt));
     g_rt.boot_start_ms = zvp_monotonic_ms();
+
+    zvp_boot_guard_state_t bg;
+    if (zvp_boot_guard_enter(&s_bg_ops,
+                             ZVP_BOOT_GUARD_PATH,
+                             ZVP_MODE_DMODE_PATH,
+                             ZVP_MODE_PRELOAD_PATH,
+                             ZVP_BOOT_GUARD_MAX_FAILS,
+                             &bg)) {
+        g_rt.boot_tripped = true;
+        g_rt.boot_evaluated = true;
+        g_rt.guard_cleared = true;
+        g_rt.plugin_active = false;
+        zvp_logf("开机看门狗自熔断触发: 连续异常>=%u次 (累计熔断=%u), 已自动还原mode3并清空preload",
+                 (unsigned)ZVP_BOOT_GUARD_MAX_FAILS, (unsigned)bg.trip_count);
+    }
+}
+
+__attribute__((destructor))
+static void zvp_on_process_exit(void)
+{
+    g_rt.shutting_down = true;
+    if (!g_rt.boot_tripped && g_rt.boot_evaluated && !g_rt.guard_cleared) {
+        zvp_boot_guard_mark_healthy(&s_bg_ops, ZVP_BOOT_GUARD_PATH);
+        g_rt.guard_cleared = true;
+    }
 }
 
 void zvp_runtime_handle_action_mask(uint32_t act_mask)
@@ -397,6 +537,15 @@ void zvp_runtime_on_animate(void)
     }
 
     /* 3. 处理长按阈值定时器与后台业务轮询 */
+    if (!g_rt.guard_cleared && g_rt.active_since_ms != 0u &&
+        now >= g_rt.active_since_ms &&
+        (now - g_rt.active_since_ms) >= ZVP_BOOT_GUARD_HEALTHY_MS) {
+        zvp_boot_guard_mark_healthy(&s_bg_ops, ZVP_BOOT_GUARD_PATH);
+        g_rt.guard_cleared = true;
+        zvp_logf("开机看门狗已解除: 插件已稳定运行 %llums",
+                 (unsigned long long)(now - g_rt.active_since_ms));
+    }
+
     uint32_t tick_act = zvp_input_tick(&g_rt.input, now);
     if (tick_act != ZVP_ACT_NONE) {
         zvp_runtime_handle_action_mask(tick_act);
@@ -432,7 +581,7 @@ void zvp_runtime_on_animate(void)
 
 void zvp_runtime_ui_frame_tick(void)
 {
-    if (g_rt.shutting_down) {
+    if (g_rt.shutting_down || should_bypass_all()) {
         return;
     }
 
@@ -472,11 +621,10 @@ void zvp_runtime_ui_frame_tick(void)
 
 static void ui_thread_bootstrap_if_needed(void)
 {
-    if (g_rt.shutting_down) {
+    if (g_rt.shutting_down || should_bypass_all()) {
         return;
     }
-    if (g_rt.bridge.ticker_ready || g_rt.bridge.ticker_failed ||
-        (g_rt.boot_evaluated && !g_rt.plugin_active)) {
+    if (g_rt.bridge.ticker_ready || g_rt.bridge.ticker_failed) {
         return;
     }
 
@@ -742,6 +890,9 @@ int snd_InfraInputEvent_to_InputServant(zvp_infra_input_event_t *ev)
     if (!real_fn) {
         real_fn = (fn_snd_event_t)dlsym(RTLD_NEXT, "snd_InfraInputEvent_to_InputServant");
     }
+    if (should_bypass_all()) {
+        return real_fn ? real_fn(ev) : 0;
+    }
     long tid = zvp_gettid();
     if (__sync_bool_compare_and_swap(&s_key_dispatch_tid, 0L, tid)) {
         bool consumed = dispatch_event_fast(ev);
@@ -761,6 +912,9 @@ static int dispatch_key_cb_common(fn_cb_panel_t *real_cache, const char *sym, in
 {
     if (!*real_cache) {
         *real_cache = (fn_cb_panel_t)dlsym(RTLD_NEXT, sym);
+    }
+    if (should_bypass_all()) {
+        return *real_cache ? (*real_cache)(dev, ev) : 0;
     }
     long tid = zvp_gettid();
     if (__sync_bool_compare_and_swap(&s_key_dispatch_tid, 0L, tid)) {
@@ -831,6 +985,9 @@ static int dispatch_tp_cb_common(fn_cb_tp_t *real_cache, const char *sym, int de
 {
     if (!*real_cache) {
         *real_cache = (fn_cb_tp_t)dlsym(RTLD_NEXT, sym);
+    }
+    if (should_bypass_all()) {
+        return *real_cache ? (*real_cache)(dev, ev) : 0;
     }
     long tid = zvp_gettid();
     if (__sync_bool_compare_and_swap(&s_tp_dispatch_tid, 0L, tid)) {
@@ -914,6 +1071,9 @@ void *_ZN12InputService11createEventEmh(void *self, unsigned long ev_id, unsigne
     if (!real_fn) {
         real_fn = (fn_create_event_t)dlsym(RTLD_NEXT, "_ZN12InputService11createEventEmh");
     }
+    if (should_bypass_all()) {
+        return real_fn ? real_fn(self, ev_id, flag) : NULL;
+    }
     long tid = zvp_gettid();
     if (should_suppress_thread(tid)) {
         return NULL;
@@ -961,6 +1121,10 @@ void _ZN12InputService13setFlipStatusEbb(void *self, bool flip, bool b2)
     if (!real_fn) {
         real_fn = (fn_set_flip_t)dlsym(RTLD_NEXT, "_ZN12InputService13setFlipStatusEbb");
     }
+    if (should_bypass_all()) {
+        if (real_fn) real_fn(self, flip, b2);
+        return;
+    }
     bool prev_rot = zvp_input_is_ui_rotated_180(&g_rt.input);
     zvp_input_update_flip(&g_rt.input, flip);
     if (real_fn) {
@@ -977,6 +1141,10 @@ void _ZN12InputService16setViewCoordR180Eb(void *self, bool r180)
     static fn_set_r180_t real_fn = NULL;
     if (!real_fn) {
         real_fn = (fn_set_r180_t)dlsym(RTLD_NEXT, "_ZN12InputService16setViewCoordR180Eb");
+    }
+    if (should_bypass_all()) {
+        if (real_fn) real_fn(self, r180);
+        return;
     }
     bool prev_rot = zvp_input_is_ui_rotated_180(&g_rt.input);
     zvp_input_update_flip(&g_rt.input, r180);
@@ -1010,7 +1178,7 @@ void _ZN14GlobalAccessor16SetObjCategoryIDEj(void *self, unsigned int cat_id)
             __atomic_store_n(&real_fn, fn, __ATOMIC_RELEASE);
         }
     }
-    if (!(g_rt.boot_evaluated && !g_rt.plugin_active) && cat_id == 0x3410u) {
+    if (!should_bypass_all() && cat_id == 0x3410u) {
         __atomic_store_n(&s_sound_ga, self, __ATOMIC_RELEASE);
     }
     if (fn) {
@@ -1028,7 +1196,7 @@ void _ZN14GlobalAccessor13RegistSwBlockEjPv(void *self, unsigned int idx, void *
             __atomic_store_n(&real_fn, fn, __ATOMIC_RELEASE);
         }
     }
-    if (!(g_rt.boot_evaluated && !g_rt.plugin_active)) {
+    if (!should_bypass_all()) {
         void *ga = __atomic_load_n(&s_sound_ga, __ATOMIC_ACQUIRE);
         if (self && self == ga && idx == 2u && ptr) {
             zvp_sound_on_sys_data(ptr);
@@ -1050,7 +1218,7 @@ int _ZN3MWF5ObjIf17IssueCommandAsyncEPvPNS_6ObjMsgE(void *obj_if, void *msg)
             __atomic_store_n(&real_fn, fn, __ATOMIC_RELEASE);
         }
     }
-    if (!(g_rt.boot_evaluated && !g_rt.plugin_active) && obj_if && msg) {
+    if (!should_bypass_all() && obj_if && msg) {
         fn_msg_get_cat_t cat_fn = __atomic_load_n(&get_cat_fn, __ATOMIC_ACQUIRE);
         if (!cat_fn) {
             cat_fn = (fn_msg_get_cat_t)dlsym(RTLD_DEFAULT, "_ZNK3MWF6ObjMsg13GetCategoryIdEv");
