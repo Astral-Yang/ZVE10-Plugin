@@ -698,7 +698,7 @@ static bool is_touch_event(const zvp_infra_input_event_t *ev)
 
 static void enqueue_action_mask(uint32_t act)
 {
-    uint32_t q_act = act & ~ZVP_ACT_CONSUME_SYS;
+    uint32_t q_act = act & ~(ZVP_ACT_CONSUME_SYS | ZVP_ACT_DEFER_C1 | ZVP_ACT_REPLAY_C1);
     if (q_act == ZVP_ACT_NONE) {
         return;
     }
@@ -836,10 +836,10 @@ static void trigger_shutter_sound_if_enabled(uint64_t now)
 }
 
 /* 输入线程快路径：<10us，严禁磁盘 I/O、usleep、LVGL 或 libObj 调用 */
-static bool dispatch_event_fast(const zvp_infra_input_event_t *ev)
+static uint32_t dispatch_event_fast(const zvp_infra_input_event_t *ev)
 {
     if (!g_rt.plugin_active || !ev) {
-        return false;
+        return ZVP_ACT_NONE;
     }
 
     if (is_touch_event(ev)) {
@@ -854,7 +854,7 @@ static bool dispatch_event_fast(const zvp_infra_input_event_t *ev)
             g_rt.touch_dirty = true;
             __sync_synchronize();
         }
-        return (tact & ZVP_ACT_CONSUME_SYS) != 0u;
+        return (tact & ZVP_ACT_CONSUME_SYS) ? ZVP_ACT_CONSUME_SYS : ZVP_ACT_NONE;
     }
 
     uint32_t keycode = ev->w0;
@@ -875,14 +875,97 @@ static bool dispatch_event_fast(const zvp_infra_input_event_t *ev)
     if (kact != ZVP_ACT_NONE) {
         enqueue_action_mask(kact);
     }
-    if ((was_menu || g_rt.input.menu_visible) && keycode != 0u &&
+    bool is_c1_key = (keycode == g_rt.input.c1_keycode || keycode == ZVP_KEY_C1_DEFOCUS_AUX);
+    if ((was_menu || g_rt.input.menu_visible || is_c1_key) && keycode != 0u &&
         !is_sensor_noise_event_id(keycode)) {
         enqueue_keylog(keycode, ev->w2, consumed);
     }
-    return consumed;
+    return kact;
 }
 
+typedef struct zvp_deferred_c1_pkt {
+    bool is_snd;
+    void *fn;
+    int dev;
+    zvp_infra_input_event_t ev;
+} zvp_deferred_c1_pkt_t;
+
+#define ZVP_C1_DEFER_MAX 4u
+static zvp_deferred_c1_pkt_t s_c1_defer_pkts[ZVP_C1_DEFER_MAX];
+static uint32_t s_c1_defer_cnt = 0u;
 static volatile long s_key_dispatch_tid = 0;
+
+static void record_deferred_c1_pkt(bool is_snd, void *fn, int dev, const zvp_infra_input_event_t *ev)
+{
+    if (!ev || !fn) {
+        return;
+    }
+    if (ev->w0 == g_rt.input.c1_keycode) {
+        s_c1_defer_cnt = 0u;
+    }
+    for (uint32_t i = 0u; i < s_c1_defer_cnt; i++) {
+        if (s_c1_defer_pkts[i].is_snd == is_snd &&
+            s_c1_defer_pkts[i].ev.w0 == ev->w0) {
+            return;
+        }
+    }
+    if (s_c1_defer_cnt < ZVP_C1_DEFER_MAX) {
+        s_c1_defer_pkts[s_c1_defer_cnt].is_snd = is_snd;
+        s_c1_defer_pkts[s_c1_defer_cnt].fn = fn;
+        s_c1_defer_pkts[s_c1_defer_cnt].dev = dev;
+        s_c1_defer_pkts[s_c1_defer_cnt].ev = *ev;
+        s_c1_defer_cnt++;
+    }
+}
+
+static void replay_deferred_c1_pkts(void)
+{
+    uint32_t cnt = s_c1_defer_cnt;
+    s_c1_defer_cnt = 0u;
+    for (uint32_t i = 0u; i < cnt; i++) {
+        zvp_deferred_c1_pkt_t *p = &s_c1_defer_pkts[i];
+        if (!p->fn) {
+            continue;
+        }
+        if (p->is_snd) {
+            ((fn_snd_event_t)p->fn)(&p->ev);
+        } else {
+            ((fn_cb_panel_t)p->fn)(p->dev, &p->ev);
+        }
+    }
+}
+
+static int dispatch_key_entry_impl(bool is_snd, void *fn_ptr, int dev, zvp_infra_input_event_t *ev)
+{
+    long tid = zvp_gettid();
+    if (__sync_bool_compare_and_swap(&s_key_dispatch_tid, 0L, tid)) {
+        uint32_t kact = dispatch_event_fast(ev);
+        bool consumed = (kact & ZVP_ACT_CONSUME_SYS) != 0u;
+        if (kact & ZVP_ACT_DEFER_C1) {
+            record_deferred_c1_pkt(is_snd, fn_ptr, dev, ev);
+        }
+        mark_thread_suppress(tid, consumed);
+        if (consumed) {
+            __sync_bool_compare_and_swap(&s_key_dispatch_tid, tid, 0L);
+            return 0;
+        }
+        if (kact & ZVP_ACT_REPLAY_C1) {
+            replay_deferred_c1_pkts();
+        }
+        int ret = 0;
+        if (fn_ptr) {
+            ret = is_snd ? ((fn_snd_event_t)fn_ptr)(ev)
+                         : ((fn_cb_panel_t)fn_ptr)(dev, ev);
+        }
+        __sync_bool_compare_and_swap(&s_key_dispatch_tid, tid, 0L);
+        return ret;
+    }
+    if (!fn_ptr) {
+        return 0;
+    }
+    return is_snd ? ((fn_snd_event_t)fn_ptr)(ev)
+                  : ((fn_cb_panel_t)fn_ptr)(dev, ev);
+}
 
 int snd_InfraInputEvent_to_InputServant(zvp_infra_input_event_t *ev)
 {
@@ -893,19 +976,7 @@ int snd_InfraInputEvent_to_InputServant(zvp_infra_input_event_t *ev)
     if (should_bypass_all()) {
         return real_fn ? real_fn(ev) : 0;
     }
-    long tid = zvp_gettid();
-    if (__sync_bool_compare_and_swap(&s_key_dispatch_tid, 0L, tid)) {
-        bool consumed = dispatch_event_fast(ev);
-        mark_thread_suppress(tid, consumed);
-        if (consumed) {
-            __sync_bool_compare_and_swap(&s_key_dispatch_tid, tid, 0L);
-            return 0;
-        }
-        int ret = real_fn ? real_fn(ev) : 0;
-        __sync_bool_compare_and_swap(&s_key_dispatch_tid, tid, 0L);
-        return ret;
-    }
-    return real_fn ? real_fn(ev) : 0;
+    return dispatch_key_entry_impl(true, (void *)real_fn, 0, ev);
 }
 
 static int dispatch_key_cb_common(fn_cb_panel_t *real_cache, const char *sym, int dev, zvp_infra_input_event_t *ev)
@@ -916,19 +987,7 @@ static int dispatch_key_cb_common(fn_cb_panel_t *real_cache, const char *sym, in
     if (should_bypass_all()) {
         return *real_cache ? (*real_cache)(dev, ev) : 0;
     }
-    long tid = zvp_gettid();
-    if (__sync_bool_compare_and_swap(&s_key_dispatch_tid, 0L, tid)) {
-        bool consumed = dispatch_event_fast(ev);
-        mark_thread_suppress(tid, consumed);
-        if (consumed) {
-            __sync_bool_compare_and_swap(&s_key_dispatch_tid, tid, 0L);
-            return 0;
-        }
-        int ret = *real_cache ? (*real_cache)(dev, ev) : 0;
-        __sync_bool_compare_and_swap(&s_key_dispatch_tid, tid, 0L);
-        return ret;
-    }
-    return *real_cache ? (*real_cache)(dev, ev) : 0;
+    return dispatch_key_entry_impl(false, (void *)(*real_cache), dev, ev);
 }
 
 int _ZN12InputService14callback_panelEiP16_InfraInputEvent(int dev, zvp_infra_input_event_t *ev)

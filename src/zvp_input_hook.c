@@ -23,6 +23,7 @@ void zvp_input_set_c1_mode(zvp_input_state_t *st, zvp_c1_mode_t mode)
     st->c1_mode = mode;
     st->c1_is_down = false;
     st->c1_long_fired = false;
+    st->c1_suppress_aux_up = false;
 }
 
 void zvp_input_set_auto_flip(zvp_input_state_t *st, bool enable)
@@ -54,9 +55,17 @@ uint32_t zvp_input_process_key(zvp_input_state_t *st,
     }
 
     if (keycode == ZVP_KEY_C1_DEFOCUS_AUX) {
-        /* 短按独占模式、菜单开启状态或正在长按屏蔽期时，一并吞掉伴生散焦事件 */
+        /* 短按独占模式、菜单开启状态或已触发长按时，一并吞掉伴生散焦/自定义事件 */
         if (st->c1_mode == ZVP_C1_MODE_SHORT_EXCLUSIVE || st->menu_visible ||
-            st->c1_is_down || st->c1_long_fired) {
+            st->c1_long_fired) {
+            return ZVP_ACT_CONSUME_SYS;
+        }
+        /* 长按模式下等待 500ms 判别期间暂扣伴生按下事件，短按松手时一并回放给原厂 */
+        if (is_press && st->c1_is_down) {
+            return ZVP_ACT_DEFER_C1 | ZVP_ACT_CONSUME_SYS;
+        }
+        if (!is_press && st->c1_suppress_aux_up) {
+            st->c1_suppress_aux_up = false;
             return ZVP_ACT_CONSUME_SYS;
         }
         return ZVP_ACT_NONE;
@@ -77,20 +86,23 @@ uint32_t zvp_input_process_key(zvp_input_state_t *st,
                 return ZVP_ACT_CONSUME_SYS;
             }
         } else {
-            /* 默认长按模式 (>=500ms 触发，短按透传给相机原功能) */
+            /* 默认长按模式 (>=500ms 触发，按下期间先暂扣，短按松手完整回放激活原厂功能) */
             if (is_press) {
                 if (!st->c1_is_down) {
                     st->c1_is_down = true;
                     st->c1_long_fired = false;
+                    st->c1_suppress_aux_up = false;
                     st->c1_press_ms = now_ms;
-                    return ZVP_ACT_NONE;
+                    return st->menu_visible
+                               ? ZVP_ACT_CONSUME_SYS
+                               : (ZVP_ACT_DEFER_C1 | ZVP_ACT_CONSUME_SYS);
                 }
                 if (!st->c1_long_fired && (now_ms - st->c1_press_ms) >= ZVP_C1_LONG_PRESS_MS) {
                     st->c1_long_fired = true;
                     st->menu_visible = !st->menu_visible;
                     return ZVP_ACT_TOGGLE_MENU | ZVP_ACT_CONSUME_SYS;
                 }
-                return st->c1_long_fired ? ZVP_ACT_CONSUME_SYS : ZVP_ACT_NONE;
+                return ZVP_ACT_CONSUME_SYS;
             } else {
                 bool fired = st->c1_long_fired;
                 uint64_t held = now_ms - st->c1_press_ms;
@@ -99,14 +111,20 @@ uint32_t zvp_input_process_key(zvp_input_state_t *st,
                 st->c1_long_fired = false;
 
                 if (fired) {
+                    st->c1_suppress_aux_up = true;
                     return ZVP_ACT_CONSUME_SYS;
                 }
                 if (was_down && held >= ZVP_C1_LONG_PRESS_MS) {
+                    st->c1_suppress_aux_up = true;
                     st->menu_visible = !st->menu_visible;
                     return ZVP_ACT_TOGGLE_MENU | ZVP_ACT_CONSUME_SYS;
                 }
-                /* 短按松手直接放行给原厂背景虚化/自定义功能 */
-                return ZVP_ACT_NONE;
+                if (st->menu_visible) {
+                    st->c1_suppress_aux_up = true;
+                    return ZVP_ACT_CONSUME_SYS;
+                }
+                /* 短按松手：触发回放已暂扣的按下包并放行松手事件给原厂 */
+                return was_down ? ZVP_ACT_REPLAY_C1 : ZVP_ACT_NONE;
             }
         }
     }

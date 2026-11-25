@@ -169,7 +169,9 @@ typedef enum {
     ZVP_ACT_TOUCH_UP    = 1 << 9,
     ZVP_ACT_CONSUME_SYS = 1 << 10, /* 置位表示吞掉该系统事件，不转发给 RTLD_NEXT */
     ZVP_ACT_DIAL_NEXT   = 1 << 11, /* 滚轮顺时针（向下/向右切换） */
-    ZVP_ACT_DIAL_PREV   = 1 << 12  /* 滚轮逆时针（向上/向左切换） */
+    ZVP_ACT_DIAL_PREV   = 1 << 12, /* 滚轮逆时针（向上/向左切换） */
+    ZVP_ACT_DEFER_C1    = 1 << 13, /* 长按模式未达阈值前暂扣 C1 按下事件 */
+    ZVP_ACT_REPLAY_C1   = 1 << 14  /* 长按模式短按松手时立即回放暂扣的按下事件 */
 } zvp_input_action_t;
 
 typedef struct zvp_input_state {
@@ -182,6 +184,7 @@ typedef struct zvp_input_state {
     /* 长按判别状态机 */
     bool c1_is_down;
     bool c1_long_fired;
+    bool c1_suppress_aux_up;
     uint64_t c1_press_ms;
 
     /* 最近触控逻辑坐标 (0..639, 0..479，已根据翻转状态换算) */

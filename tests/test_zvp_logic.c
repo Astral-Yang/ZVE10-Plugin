@@ -309,19 +309,23 @@ static void test_input_c1_and_flip(void)
     assert(!st.menu_visible);
     assert(zvp_input_process_key(&st, ZVP_KEY_C1_DEFAULT, false, 1550) == ZVP_ACT_CONSUME_SYS);
 
-    /* 2. 切换至长按模式：短按(200ms)透传，不弹出菜单 */
+    /* 2. 切换至长按模式：短按(150ms) 按下期间主码与伴生散焦码均暂扣(DEFER)，松手触发回放(REPLAY)激活原厂 */
     zvp_input_set_c1_mode(&st, ZVP_C1_MODE_LONG_PRESS);
-    assert(zvp_input_process_key(&st, ZVP_KEY_C1_DEFAULT, true, 1800) == ZVP_ACT_NONE);
-    assert(zvp_input_process_key(&st, ZVP_KEY_C1_DEFAULT, false, 1950) == ZVP_ACT_NONE);
+    assert(zvp_input_process_key(&st, ZVP_KEY_C1_DEFAULT, true, 1800) == (ZVP_ACT_DEFER_C1 | ZVP_ACT_CONSUME_SYS));
+    assert(zvp_input_process_key(&st, ZVP_KEY_C1_DEFOCUS_AUX, true, 1802) == (ZVP_ACT_DEFER_C1 | ZVP_ACT_CONSUME_SYS));
+    assert(zvp_input_process_key(&st, ZVP_KEY_C1_DEFAULT, false, 1950) == ZVP_ACT_REPLAY_C1);
+    assert(zvp_input_process_key(&st, ZVP_KEY_C1_DEFOCUS_AUX, false, 1952) == ZVP_ACT_NONE);
     assert(!st.menu_visible);
 
-    /* 3. 长按模式：按住超 500ms 由 tick 唤醒，松手事件被吞掉 */
-    assert(zvp_input_process_key(&st, ZVP_KEY_C1_DEFAULT, true, 2000) == ZVP_ACT_NONE);
+    /* 3. 长按模式：按住超 500ms 由 tick 唤醒，松手事件及伴生散焦事件全被吞掉，绝不误触原厂 */
+    assert(zvp_input_process_key(&st, ZVP_KEY_C1_DEFAULT, true, 2000) == (ZVP_ACT_DEFER_C1 | ZVP_ACT_CONSUME_SYS));
+    assert(zvp_input_process_key(&st, ZVP_KEY_C1_DEFOCUS_AUX, true, 2002) == (ZVP_ACT_DEFER_C1 | ZVP_ACT_CONSUME_SYS));
     assert(zvp_input_tick(&st, 2499) == ZVP_ACT_NONE);
     act = zvp_input_tick(&st, 2500);
     assert((act & ZVP_ACT_TOGGLE_MENU) && (act & ZVP_ACT_CONSUME_SYS));
     assert(st.menu_visible);
     assert(zvp_input_process_key(&st, ZVP_KEY_C1_DEFAULT, false, 2600) == ZVP_ACT_CONSUME_SYS);
+    assert(zvp_input_process_key(&st, ZVP_KEY_C1_DEFOCUS_AUX, false, 2602) == ZVP_ACT_CONSUME_SYS);
 
     /* 4. 菜单开启时拦截方向键、OK键、滚轮与触摸，且 MENU 键不关闭菜单（只用 C1 开关） */
     assert(zvp_input_process_key(&st, ZVP_KEY_DOWN, true, 2700) == (ZVP_ACT_NAV_DOWN | ZVP_ACT_CONSUME_SYS));
