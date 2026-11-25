@@ -20,6 +20,17 @@ extern "C" {
 
 #define ZVP_SOUND_ACTIVE_BIN_PATH "/tmp/zvp_shutter.bin"
 #define ZVP_SOUND_SLOT_PREFIX     "/usr/share/avsystemsound/zvp_slot_"
+#define ZVP_SOUND_CACHE_SLOTS     4u
+
+typedef struct {
+    bool     occupied;
+    uint8_t  slot;
+    bool     is_builtin;
+    uint8_t  builtin_id;
+    char     path[ZVP_SOUND_PATH_LEN];
+    uint32_t f0_bytes;
+    uint32_t last_seq;
+} zvp_sound_slot_cache_t;
 
 typedef struct {
     uint16_t channels;
@@ -48,6 +59,9 @@ typedef struct {
     bool prepared;
     uint8_t active_slot;
     uint32_t slot_cursor;
+    uint32_t cache_seq;
+    uint32_t evict_count;
+    zvp_sound_slot_cache_t slot_cache[ZVP_SOUND_CACHE_SLOTS];
     uint32_t last_f0_bytes;
     int32_t last_error;
     uint32_t play_count;
@@ -84,6 +98,7 @@ bool zvp_sound_play_prepared(zvp_sound_mgr_t *mgr, uint64_t now_ms);
 /* 全量恢复系统 SoundTable 原始槽位、关闭重映射并清理临时音频缓存 */
 void zvp_sound_reset(zvp_sound_mgr_t *mgr);
 void zvp_sound_hook_reset(void);
+bool zvp_sound_hook_unregist_adf(uint8_t adf_id);
 
 /* 固件运行时桥接回调（由 zvp_entry.c 注入或宿主空实现） */
 void zvp_sound_on_sys_data(void *sys_snd_data);

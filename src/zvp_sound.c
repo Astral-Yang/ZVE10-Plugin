@@ -582,6 +582,48 @@ const char *zvp_sound_remap_fopen_path(const char *path)
     return path;
 }
 
+static void dump_adf_table_summary(const uint8_t *sys_snd, const char *tag)
+{
+#if !defined(ZVP_HOST_TEST) && !defined(_WIN32)
+    if (!sys_snd) {
+        return;
+    }
+    const uintptr_t tbl_start = (uintptr_t)(sys_snd + ZVP_SYSSND_TABLE_OFF);
+    const uintptr_t tbl_end = tbl_start + (size_t)ZVP_SYSSND_MAX_ID * ZVP_SYSSND_ENTRY_STRIDE;
+    char line[320];
+    for (uint32_t half = 0u; half < 2u; half++) {
+        size_t pos = 0u;
+        uint32_t start_i = half * 10u;
+        uint32_t end_i = start_i + 10u;
+        pos += (size_t)snprintf(line + pos, sizeof(line) - pos, "Adf[%s %u..%u]:",
+                                tag ? tag : "?", (unsigned)start_i, (unsigned)(end_i - 1u));
+        for (uint32_t i = start_i; i < end_i && pos + 28u < sizeof(line); i++) {
+            const uint8_t *ent = sys_snd + ZVP_SYSSND_ADF_OFF + i * ZVP_SYSSND_ADF_STRIDE;
+            uintptr_t info_addr = 0u;
+            uint32_t status = 0u;
+            memcpy(&info_addr, ent + 0u, sizeof(info_addr));
+            memcpy(&status, ent + 8u, sizeof(status));
+            uint8_t adf_id = ent[6u];
+            uint8_t lru = ent[7u];
+            uint8_t fixed = ent[12u];
+            int sid = -1;
+            if (info_addr >= tbl_start && info_addr + 4u <= tbl_end &&
+                ((info_addr - tbl_start) % ZVP_SYSSND_ENTRY_STRIDE) == 0u) {
+                sid = (int)(*(const uint32_t *)info_addr);
+            }
+            pos += (size_t)snprintf(line + pos, sizeof(line) - pos,
+                                    " [%02x:s%u:f%u:a%u:id%d]",
+                                    (unsigned)adf_id, (unsigned)status,
+                                    (unsigned)fixed, (unsigned)lru, sid);
+        }
+        sound_logf("%s", line);
+    }
+#else
+    (void)sys_snd;
+    (void)tag;
+#endif
+}
+
 static void bind_sound_table_slot(uint8_t *sys_snd, uint8_t slot)
 {
     if (!sys_snd || slot >= ZVP_SYSSND_MAX_ID) {
@@ -629,15 +671,18 @@ static void bind_sound_table_slot(uint8_t *sys_snd, uint8_t slot)
 #endif
     char *fname = (char *)(entry + ZVP_SYSSND_NAME_OFF);
     snprintf(fname, 64u, "zvp_slot_%02x.bin", (unsigned)slot);
-    if (__atomic_load_n(&g_play_diag_count, __ATOMIC_RELAXED) < 4u) {
+    if (__atomic_load_n(&g_play_diag_count, __ATOMIC_RELAXED) < 64u) {
         dump_sound_table_slot(sys_snd, slot, "BIND");
     }
 }
 
-static bool is_slot_in_adf_cache(const uint8_t *sys_snd, uint8_t sound_id)
+static int find_adf_slot_idx(const uint8_t *sys_snd,
+                             uint8_t sound_id,
+                             uint32_t *out_status,
+                             uint8_t *out_adf_id)
 {
     if (!sys_snd) {
-        return false;
+        return -1;
     }
     const uintptr_t tbl_start = (uintptr_t)(sys_snd + ZVP_SYSSND_TABLE_OFF);
     const uintptr_t tbl_end = tbl_start + (size_t)ZVP_SYSSND_MAX_ID * ZVP_SYSSND_ENTRY_STRIDE;
@@ -655,32 +700,197 @@ static bool is_slot_in_adf_cache(const uint8_t *sys_snd, uint8_t sound_id)
             /* SoundTable 首字段即 soundId (32位)，仅在地址严格落入 SoundTable 条目首部时解引用 */
             uint32_t sid = *(const uint32_t *)info_addr;
             if (sid == (uint32_t)sound_id) {
-                return true;
+                if (out_status) *out_status = status;
+                if (out_adf_id) *out_adf_id = ent[6u];
+                return (int)i;
             }
+        }
+    }
+    return -1;
+}
+
+static bool is_slot_in_adf_cache(const uint8_t *sys_snd, uint8_t sound_id)
+{
+    return find_adf_slot_idx(sys_snd, sound_id, NULL, NULL) >= 0;
+}
+
+static bool is_slot_bound_by_us(const uint8_t *sys_snd, uint8_t slot)
+{
+    if (!sys_snd || slot >= ZVP_SYSSND_MAX_ID) {
+        return false;
+    }
+    const uint8_t *entry = sys_snd + ZVP_SYSSND_TABLE_OFF +
+                           (size_t)slot * ZVP_SYSSND_ENTRY_STRIDE;
+    char expected[32];
+    snprintf(expected, sizeof(expected), "zvp_slot_%02x.bin", (unsigned)slot);
+    return strncmp((const char *)(entry + ZVP_SYSSND_NAME_OFF), expected, 32u) == 0;
+}
+
+static bool cache_matches_item(const zvp_sound_slot_cache_t *c, const zvp_sound_item_t *it)
+{
+    if (!c || !c->occupied || !it) {
+        return false;
+    }
+    if (c->is_builtin != it->is_builtin) {
+        return false;
+    }
+    if (c->is_builtin) {
+        return c->builtin_id == it->builtin_id;
+    }
+    return strcmp(c->path, it->path) == 0;
+}
+
+static bool slot_in_mgr_cache(const zvp_sound_mgr_t *mgr, uint8_t slot)
+{
+    for (uint32_t i = 0u; i < ZVP_SOUND_CACHE_SLOTS; i++) {
+        if (mgr->slot_cache[i].occupied && mgr->slot_cache[i].slot == slot) {
+            return true;
         }
     }
     return false;
 }
 
-static uint8_t pick_and_bind_slot(zvp_sound_mgr_t *mgr)
+static void unregist_and_clear_slot(uint8_t *sys_snd, uint8_t slot)
+{
+    if (!sys_snd) {
+        return;
+    }
+    uint32_t st = 0u;
+    uint8_t adf_id = 0u;
+    int idx = find_adf_slot_idx(sys_snd, slot, &st, &adf_id);
+    if (idx < 0) {
+        return;
+    }
+#if !defined(ZVP_HOST_TEST) && !defined(_WIN32)
+    if (adf_id >= 1u && adf_id <= ZVP_SYSSND_ADF_SLOTS) {
+        (void)zvp_sound_hook_unregist_adf(adf_id);
+        usleep(15000);
+    }
+#else
+    (void)st;
+    (void)adf_id;
+#endif
+    uint8_t *ent = sys_snd + ZVP_SYSSND_ADF_OFF + (uint32_t)idx * ZVP_SYSSND_ADF_STRIDE;
+    uintptr_t zero_ptr = 0u;
+    uint32_t zero_u32 = 0u;
+    memcpy(ent + 0u, &zero_ptr, sizeof(zero_ptr));
+    ent[4u] = 0u;
+    ent[5u] = 0u;
+    ent[7u] = 0u;
+    memcpy(ent + 8u, &zero_u32, sizeof(zero_u32));
+    ent[12u] = 0u;
+    sound_logf("sound 卸载旧槽位完成: slot=0x%02x adf=0x%02x", (unsigned)slot, (unsigned)adf_id);
+}
+
+static uint8_t pick_and_bind_slot_for_item(zvp_sound_mgr_t *mgr,
+                                           const zvp_sound_item_t *it,
+                                           uint32_t f0_bytes)
 {
     uint32_t n = (uint32_t)(sizeof(k_unused_app_slots) / sizeof(k_unused_app_slots[0]));
-    uint8_t chosen = k_unused_app_slots[mgr->slot_cursor % n];
     uint8_t *sys_snd = __atomic_load_n(&g_sys_snd_data, __ATOMIC_ACQUIRE);
+    int target_idx = -1;
+    uint8_t chosen = k_unused_app_slots[mgr->slot_cursor % n];
 
+    /* 0. 若某个缓存槽位在硬件 adfTable 中被非本插件音色占用（例如初始化前预占冲突），作废该缓存项 */
     if (sys_snd) {
-        for (uint32_t step = 0u; step < n; step++) {
-            uint8_t cand = k_unused_app_slots[(mgr->slot_cursor + step) % n];
-            if (!is_slot_in_adf_cache(sys_snd, cand)) {
-                chosen = cand;
-                mgr->slot_cursor = (mgr->slot_cursor + step + 1u) % n;
+        for (uint32_t i = 0u; i < ZVP_SOUND_CACHE_SLOTS; i++) {
+            if (mgr->slot_cache[i].occupied &&
+                is_slot_in_adf_cache(sys_snd, mgr->slot_cache[i].slot) &&
+                !is_slot_bound_by_us(sys_snd, mgr->slot_cache[i].slot)) {
+                mgr->slot_cache[i].occupied = false;
+            }
+        }
+    }
+
+    /* 1. 优先复用该音效已分配且尚未切走的缓存槽位（含尚未进 adfTable 的情况） */
+    if (it) {
+        for (uint32_t i = 0u; i < ZVP_SOUND_CACHE_SLOTS; i++) {
+            if (cache_matches_item(&mgr->slot_cache[i], it)) {
+                target_idx = (int)i;
+                chosen = mgr->slot_cache[i].slot;
                 break;
             }
         }
-        /* 安全核验 SoundTable[chosen].soundId == chosen 后改写 fileName */
+    }
+
+    /* 2. 若未匹配到已有条目，优先回收尚未实际加载进 adfTable 的闲置绑定槽位 */
+    if (target_idx < 0 && sys_snd) {
+        for (uint32_t i = 0u; i < ZVP_SOUND_CACHE_SLOTS; i++) {
+            if (mgr->slot_cache[i].occupied &&
+                !is_slot_in_adf_cache(sys_snd, mgr->slot_cache[i].slot)) {
+                target_idx = (int)i;
+                chosen = mgr->slot_cache[i].slot;
+                break;
+            }
+        }
+    }
+
+    /* 3. 若仍有未占用缓存位 (< 4)，从空闲保留槽位中选出未在 adfTable 也未在缓存中的新槽位 */
+    if (target_idx < 0) {
+        for (uint32_t i = 0u; i < ZVP_SOUND_CACHE_SLOTS; i++) {
+            if (!mgr->slot_cache[i].occupied) {
+                target_idx = (int)i;
+                break;
+            }
+        }
+        if (target_idx >= 0) {
+            bool found_free = false;
+            for (uint32_t step = 0u; step < n; step++) {
+                uint8_t cand = k_unused_app_slots[(mgr->slot_cursor + step) % n];
+                if (!slot_in_mgr_cache(mgr, cand) &&
+                    (!sys_snd || !is_slot_in_adf_cache(sys_snd, cand))) {
+                    chosen = cand;
+                    mgr->slot_cursor = (mgr->slot_cursor + step + 1u) % n;
+                    found_free = true;
+                    break;
+                }
+            }
+            if (!found_free) {
+                mgr->slot_cursor = (mgr->slot_cursor + 1u) % n;
+            }
+        }
+    }
+
+    /* 4. 4 个活跃缓存位全部在 adfTable 中已占用（>4 个不同音频）：LRU 淘汰并主动卸载最旧槽位 */
+    if (target_idx < 0) {
+        uint32_t victim_i = 0u;
+        uint32_t best_seq = UINT32_MAX;
+        for (uint32_t i = 0u; i < ZVP_SOUND_CACHE_SLOTS; i++) {
+            uint32_t st = 0u;
+            if (sys_snd) {
+                (void)find_adf_slot_idx(sys_snd, mgr->slot_cache[i].slot, &st, NULL);
+            }
+            uint32_t penalty = (st == 6u) ? 0x80000000u : 0u;
+            uint32_t score = mgr->slot_cache[i].last_seq;
+            if (penalty == 0u && score <= best_seq) {
+                best_seq = score;
+                victim_i = i;
+            } else if (best_seq == UINT32_MAX) {
+                victim_i = i;
+            }
+        }
+        target_idx = (int)victim_i;
+        chosen = mgr->slot_cache[victim_i].slot;
+        unregist_and_clear_slot(sys_snd, chosen);
+        mgr->evict_count++;
+    }
+
+    if (sys_snd) {
+        if (__atomic_load_n(&g_play_diag_count, __ATOMIC_RELAXED) < 64u) {
+            dump_adf_table_summary(sys_snd, "PICK");
+        }
         bind_sound_table_slot(sys_snd, chosen);
-    } else {
-        mgr->slot_cursor = (mgr->slot_cursor + 1u) % n;
+    }
+
+    if (target_idx >= 0 && it) {
+        zvp_sound_slot_cache_t *c = &mgr->slot_cache[target_idx];
+        c->occupied = true;
+        c->slot = chosen;
+        c->is_builtin = it->is_builtin;
+        c->builtin_id = it->builtin_id;
+        snprintf(c->path, sizeof(c->path), "%s", it->path);
+        c->f0_bytes = f0_bytes;
+        c->last_seq = ++mgr->cache_seq;
     }
 
     __atomic_store_n(&g_remap_active, true, __ATOMIC_RELEASE);
@@ -780,7 +990,7 @@ static bool hw_play_slot(uint8_t sound_id, int32_t *out_err)
     s_msg_dtor(msg_buf);
 
     uint32_t dcnt = __atomic_fetch_add(&g_play_diag_count, 1u, __ATOMIC_RELAXED);
-    if (rc != 0 || dcnt < 12u) {
+    if (rc != 0 || dcnt < 64u) {
         sound_logf("sound hw_play #%u: slot=0x%02x obj_if=%p sys_snd=%p rc=%d",
                    (unsigned)(dcnt + 1u), (unsigned)sound_id, obj_if,
                    (void *)__atomic_load_n(&g_sys_snd_data, __ATOMIC_ACQUIRE), rc);
@@ -1276,6 +1486,29 @@ bool zvp_sound_prepare_current(zvp_sound_mgr_t *mgr)
     }
 
     const zvp_sound_item_t *it = &mgr->items[mgr->selected_idx];
+    uint8_t *sys_snd = __atomic_load_n(&g_sys_snd_data, __ATOMIC_ACQUIRE);
+
+    /* 若该音效已在硬件 adfTable 缓存且 SoundTable 绑定完整，直接命中复用，避免重复注册与超额阻塞 */
+    if (sys_snd) {
+        for (uint32_t i = 0u; i < ZVP_SOUND_CACHE_SLOTS; i++) {
+            zvp_sound_slot_cache_t *c = &mgr->slot_cache[i];
+            if (cache_matches_item(c, it) && is_slot_bound_by_us(sys_snd, c->slot)) {
+                uint32_t st = 0u;
+                if (find_adf_slot_idx(sys_snd, c->slot, &st, NULL) >= 0 &&
+                    (st == 3u || st == 6u)) {
+                    c->last_seq = ++mgr->cache_seq;
+                    bind_sound_table_slot(sys_snd, c->slot);
+                    __atomic_store_n(&g_remap_active, true, __ATOMIC_RELEASE);
+                    mgr->active_slot = c->slot;
+                    mgr->last_f0_bytes = c->f0_bytes;
+                    mgr->last_error = 0;
+                    mgr->prepared = true;
+                    return true;
+                }
+            }
+        }
+    }
+
     size_t max_f0 = ((size_t)ZVP_SOUND_TARGET_RATE * ZVP_SOUND_MAX_SECONDS /
                      ZVP_SOUND_F0_SAMPLES_PER_BLOCK + 2u) * ZVP_SOUND_F0_BLOCK_BYTES;
     uint8_t *f0_buf = (uint8_t *)malloc(max_f0);
@@ -1309,7 +1542,7 @@ bool zvp_sound_prepare_current(zvp_sound_mgr_t *mgr)
             mgr->last_f0_bytes = (uint32_t)f0_len;
             mgr->last_error = 0;
             mgr->prepared = true;
-            pick_and_bind_slot(mgr);
+            pick_and_bind_slot_for_item(mgr, it, (uint32_t)f0_len);
             ok = true;
         } else {
             mgr->last_error = -6;
@@ -1473,6 +1706,9 @@ void zvp_sound_reset(zvp_sound_mgr_t *mgr)
     mgr->prepared = false;
     mgr->active_slot = 0x2du;
     mgr->slot_cursor = 0u;
+    mgr->cache_seq = 0u;
+    mgr->evict_count = 0u;
+    memset(mgr->slot_cache, 0, sizeof(mgr->slot_cache));
     mgr->last_f0_bytes = 0u;
     mgr->last_error = 0;
     mgr->play_count = 0u;

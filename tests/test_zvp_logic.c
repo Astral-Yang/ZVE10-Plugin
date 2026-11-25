@@ -511,7 +511,8 @@ static void test_sound_wav_and_f0_conversion(void)
     assert(mgr.play_count == 1u);
 #endif
 
-    /* 6. 校验整理后的 assets/sounds 全部示例 WAV 均可成功扫描与转码为 Sony F0 */
+    /* 6. 校验整理后的 assets/sounds 全部示例 WAV 均可成功扫描与转码为 Sony F0，
+     *    并模拟 4 个音效多轮回绕与 7 个音效（>4）淘汰 LRU 轮换不溢出、不阻塞 */
     const char *sample_dirs[] = { "assets/sounds", "../assets/sounds" };
     bool checked_samples = false;
     for (size_t d = 0u; d < 2u; d++) {
@@ -522,16 +523,99 @@ static void test_sound_wav_and_f0_conversion(void)
         zvp_sound_scan(&smgr);
         if (smgr.count > 2u) {
             assert(smgr.count == 7u);
-            for (uint32_t idx = 0u; idx < smgr.count; idx++) {
+            /* 先在清理后的 mock_sys_snd 上测试 4 个音效多轮切换命中复用（绝不超 4 个且不淘汰） */
+            memset(mock_sys_snd, 0, sizeof(mock_sys_snd));
+            for (uint32_t sid = 0u; sid < 67u; sid++) {
+                uint8_t *ent = mock_sys_snd + 140u + (size_t)sid * 160u;
+                *(uint32_t *)(ent + 0u) = sid;
+                snprintf((char *)(ent + 8u), 32u, "None");
+            }
+            zvp_sound_on_sys_data(mock_sys_snd);
+
+            /* 连续切并模拟进入 adfTable (indices 8..11) 前 4 个，再切 8 轮(32次)验证始终命中原 4 槽位且零淘汰 */
+            uint8_t round1_slots[4];
+            for (uint32_t idx = 0u; idx < 4u; idx++) {
+                assert(zvp_sound_select(&smgr, idx));
+                round1_slots[idx] = smgr.active_slot;
+                uint8_t *ent_addr = mock_sys_snd + 140u + (size_t)smgr.active_slot * 160u;
+                uint8_t *adf_ent = mock_sys_snd + 10860u + (size_t)(8u + idx) * 16u;
+                memcpy(adf_ent + 0u, &ent_addr, sizeof(ent_addr));
+                if (sizeof(ent_addr) <= 4u) {
+                    adf_ent[6u] = (uint8_t)(9u + idx);
+                }
+                *(uint32_t *)(adf_ent + 8u) = 3u;
+            }
+            assert(smgr.evict_count == 0u);
+            for (uint32_t r = 0u; r < 8u; r++) {
+                for (uint32_t idx = 0u; idx < 4u; idx++) {
+                    assert(zvp_sound_select(&smgr, idx));
+                    assert(smgr.active_slot == round1_slots[idx]);
+                }
+            }
+            assert(smgr.evict_count == 0u);
+
+            /* 场景 A: 4 槽均已进 adfTable 后，仅切不听连续切换第 5~7 个：
+             * 仅第 5 个淘汰 1 个最旧槽位(evict_count=1)，第 6、7 个原地复用该未播槽位不再增加淘汰 */
+            for (uint32_t idx = 4u; idx < smgr.count; idx++) {
                 assert(zvp_sound_select(&smgr, idx));
                 assert(smgr.prepared);
-                assert(smgr.last_f0_bytes > 0u && (smgr.last_f0_bytes % ZVP_SOUND_F0_BLOCK_BYTES) == 0u);
             }
+            assert(smgr.evict_count == 1u);
+
+            /* 场景 B: 模拟每次切换后真实播放(进 adfTable) 2 轮共 7 个音色，验证活跃 adf 始终 <= 4 */
+            uint32_t evict_before_b = smgr.evict_count;
+            for (uint32_t r = 0u; r < 2u; r++) {
+                for (uint32_t idx = 0u; idx < smgr.count; idx++) {
+                    assert(zvp_sound_select(&smgr, idx));
+                    assert(smgr.prepared);
+                    assert(smgr.last_f0_bytes > 0u && (smgr.last_f0_bytes % ZVP_SOUND_F0_BLOCK_BYTES) == 0u);
+                    bool found_in_cache = false;
+                    for (uint32_t c = 0u; c < ZVP_SOUND_CACHE_SLOTS; c++) {
+                        if (smgr.slot_cache[c].occupied && smgr.slot_cache[c].slot == smgr.active_slot) {
+                            found_in_cache = true;
+                        }
+                    }
+                    assert(found_in_cache);
+
+                    /* 模拟试听/快门播放将该槽位加载进 adfTable，并统计当前活跃 adf 数始终 <= 4 */
+                    uint8_t *ent_addr = mock_sys_snd + 140u + (size_t)smgr.active_slot * 160u;
+                    bool in_adf = false;
+                    uint32_t free_adf = 99u;
+                    uint32_t active_adf_cnt = 0u;
+                    for (uint32_t a = 0u; a < 20u; a++) {
+                        uint8_t *adf_ent = mock_sys_snd + 10860u + (size_t)a * 16u;
+                        uint32_t st = *(uint32_t *)(adf_ent + 8u);
+                        void *ptr = NULL;
+                        memcpy(&ptr, adf_ent + 0u, sizeof(ptr));
+                        if (st != 0u) {
+                            active_adf_cnt++;
+                            if (ptr == ent_addr) {
+                                in_adf = true;
+                            }
+                        } else if (free_adf == 99u && a >= 8u) {
+                            free_adf = a;
+                        }
+                    }
+                    if (!in_adf) {
+                        assert(free_adf < 20u);
+                        uint8_t *adf_ent = mock_sys_snd + 10860u + (size_t)free_adf * 16u;
+                        memcpy(adf_ent + 0u, &ent_addr, sizeof(ent_addr));
+                        if (sizeof(ent_addr) <= 4u) {
+                            adf_ent[6u] = (uint8_t)(free_adf + 1u);
+                        }
+                        *(uint32_t *)(adf_ent + 8u) = 3u;
+                        active_adf_cnt++;
+                    }
+                    assert(active_adf_cnt <= 4u);
+                }
+            }
+            assert(smgr.evict_count > evict_before_b);
             checked_samples = true;
             break;
         }
     }
     assert(checked_samples);
+    zvp_sound_on_sys_data(mock_sys_snd);
 
     /* 7. 验证 zvp_sound_reset() 还原 SoundTable 槽位、关闭重映射、重置选择并删除缓存文件 */
     zvp_sound_reset(&mgr);
