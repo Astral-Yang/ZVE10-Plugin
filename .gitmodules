@@ -1,0 +1,9 @@
+[submodule "third_party/lvgl"]
+	path = third_party/lvgl
+	url = https://github.com/lvgl/lvgl.git
+[submodule "third_party/camtool"]
+	path = third_party/camtool
+	url = https://github.com/nolan2628/Sony-ZVE-10-Camtool.git
+[submodule "third_party/pmca"]
+	path = third_party/pmca
+	url = https://github.com/ma1co/Sony-PMCA-RE.git

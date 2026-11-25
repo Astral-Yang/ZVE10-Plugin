@@ -1,0 +1,23 @@
+# Build artifacts
+build-host/
+build-arm/
+CMakeFiles/
+CMakeCache.txt
+cmake_install.cmake
+CTestTestfile.cmake
+Makefile
+compile_commands.json
+
+# Python caches
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Temporary & editor files
+*.log
+*.tmp
+*.bak
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/

@@ -1,0 +1,32 @@
+{
+  global:
+    zvp_*;
+    snd_InfraInputEvent_to_InputServant;
+    _ZN12InputService14callback_panelEiP16_InfraInputEvent;
+    _ZN12InputService15callback_directEiP16_InfraInputEvent;
+    _ZN12InputService16callback_convertEiP16_InfraInputEvent;
+    _ZN12InputService53callback_direct_not_user_operation_and_not_reload_mssEiP16_InfraInputEvent;
+    _ZN12InputService20callback_convert_capEiP16_InfraInputEvent;
+    _ZN12InputService26callback_convert_focus_magEiP16_InfraInputEvent;
+    _ZN12InputService26callback_dial_signed_speedEiP16_InfraInputEvent;
+    _ZN12InputService18callback_mode_dialEiP16_InfraInputEvent;
+    _ZN12InputService11callback_tpEiP16_InfraInputEvent;
+    _ZN12InputService15callback_tp_rawEiP16_InfraInputEvent;
+    _ZN12InputService11createEventEmh;
+    _ZN12InputService13setFlipStatusEbb;
+    _ZN12InputService16setViewCoordR180Eb;
+    _ZN2ux6wgtsys12WidgetSystem14postMousePressEhhNS_4core8MsecTimeE;
+    _ZN2ux6wgtsys12WidgetSystem13postMouseMoveEhssNS_4core8MsecTimeE;
+    _ZN2ux6wgtsys12WidgetSystem16postMouseReleaseEhhNS_4core8MsecTimeE;
+    _ZN2ux6wgtsys6Widget7setModeENS0_10WidgetModeE;
+    _ZN2ux6wgtsys6Widget7setModeENS1_10WidgetModeE;
+    _ZN20LayoutableWidgetBase12setDispStateEb;
+    fopen;
+    fopen64;
+    _ZN11ObjAvbbcCmn10OsalSndMsgEjPKhj;
+    _ZN14GlobalAccessor16SetObjCategoryIDEj;
+    _ZN14GlobalAccessor13RegistSwBlockEjPv;
+    _ZN3MWF5ObjIf17IssueCommandAsyncEPvPNS_6ObjMsgE;
+  local:
+    *;
+};
