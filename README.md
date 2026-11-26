@@ -8,7 +8,7 @@
 
 <p>
   <img src="https://img.shields.io/badge/适用机型-Sony%20ZV--E10%20(一代)-black?style=flat-square" height="20" alt="适用机型">
-  <a href="LICENSE"><img src="https://img.shields.io/badge/开源协议-MIT-blue?style=flat-square" height="20" alt="MIT License"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/开源协议-GPLv3-blue?style=flat-square" height="20" alt="GPL-3.0 License"></a>
   <a href="https://github.com/nolan2628/ZVE10-Plugin/stargazers"><img src="https://img.shields.io/github/stars/nolan2628/ZVE10-Plugin?style=flat-square" height="20" alt="GitHub Stars"></a>
   <a href="https://github.com/nolan2628/ZVE10-Plugin/issues"><img src="https://img.shields.io/github/issues/nolan2628/ZVE10-Plugin?style=flat-square" height="20" alt="GitHub Issues"></a>
   <a href="https://discord.gg/wdF3y3xCYR"><img src="https://img.shields.io/badge/Discord-交流群-5865F2?style=flat-square&logo=discord&logoColor=white" height="20" alt="Discord"></a>
@@ -243,5 +243,5 @@ ZVE10-Plugin/
 ---
 
 <div align="center">
-本项目原创代码与文档基于 <a href="LICENSE">MIT License</a> 开源 · 引用的第三方组件遵循其各自开源协议
+本项目原创代码与文档基于 <a href="LICENSE">GNU GPLv3</a> 开源 · 引用的第三方组件遵循其各自开源协议
 </div>

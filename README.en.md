@@ -8,7 +8,7 @@ Non-destructive · Clean semi-transparent menu · Instant safe rollback
 
 <p>
   <img src="https://img.shields.io/badge/Camera-Sony%20ZV--E10%20(Gen%201)-black?style=flat-square" height="20" alt="Target Camera">
-  <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-blue?style=flat-square" height="20" alt="MIT License"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/License-GPLv3-blue?style=flat-square" height="20" alt="GPL-3.0 License"></a>
   <a href="https://github.com/nolan2628/ZVE10-Plugin/stargazers"><img src="https://img.shields.io/github/stars/nolan2628/ZVE10-Plugin?style=flat-square" height="20" alt="GitHub Stars"></a>
   <a href="https://github.com/nolan2628/ZVE10-Plugin/issues"><img src="https://img.shields.io/github/issues/nolan2628/ZVE10-Plugin?style=flat-square" height="20" alt="GitHub Issues"></a>
   <a href="https://discord.gg/wdF3y3xCYR"><img src="https://img.shields.io/badge/Discord-Join%20Community-5865F2?style=flat-square&logo=discord&logoColor=white" height="20" alt="Discord"></a>
@@ -243,5 +243,5 @@ This project builds on the research and open-source contributions of:
 ---
 
 <div align="center">
-Original code and docs are licensed under the <a href="LICENSE">MIT License</a> · Third-party components retain their respective licenses
+Original code and docs are licensed under the <a href="LICENSE">GNU GPLv3</a> · Third-party components retain their respective licenses
 </div>
