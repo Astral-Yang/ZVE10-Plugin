@@ -233,6 +233,12 @@ uint32_t zvp_input_process_touch(zvp_input_state_t *st,
 /* 全局上下文访问与跨模块桥梁（供 UI、LVGL port 与入口层协调） */
 void zvp_logf(const char *fmt, ...);
 uint64_t zvp_monotonic_ms(void);
+/* 含挂起时间的单调时钟（CLOCK_BOOTTIME）；不支持时回退到 mono。 */
+uint64_t zvp_boottime_ms(void);
+/* 墙上时钟（CLOCK_REALTIME），作为 resume 检测的次选依据。 */
+uint64_t zvp_realtime_ms(void);
+/* 取走一次 display off→on 的 resume 事件（由播放路径消费）。 */
+bool zvp_runtime_take_display_resume(void);
 
 #ifdef __cplusplus
 }

@@ -80,6 +80,31 @@ uint64_t zvp_monotonic_ms(void)
     return now;
 }
 
+uint64_t zvp_boottime_ms(void)
+{
+#if defined(__arm__) && defined(SYS_clock_gettime)
+    int32_t ts[2] = { 0, 0 }; /* 32-bit ARM EABI struct timespec */
+    /* 7 = CLOCK_BOOTTIME：包含 STR 挂起时间，用于识别 resume。 */
+    if (syscall(SYS_clock_gettime, 7, ts) == 0) {
+        return (uint64_t)(uint32_t)ts[0] * 1000ull +
+               (uint64_t)(uint32_t)ts[1] / 1000000ull;
+    }
+#endif
+    return zvp_monotonic_ms();
+}
+
+uint64_t zvp_realtime_ms(void)
+{
+#if defined(__arm__) && defined(SYS_clock_gettime)
+    int32_t ts[2] = { 0, 0 }; /* 32-bit ARM EABI struct timespec */
+    if (syscall(SYS_clock_gettime, 0 /* CLOCK_REALTIME */, ts) == 0) {
+        return (uint64_t)(uint32_t)ts[0] * 1000ull +
+               (uint64_t)(uint32_t)ts[1] / 1000000ull;
+    }
+#endif
+    return 0u;
+}
+
 void zvp_logf(const char *fmt, ...)
 {
     char buf[384];

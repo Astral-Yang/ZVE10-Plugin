@@ -1638,6 +1638,11 @@ static bool play_slot_internal(zvp_sound_mgr_t *mgr, uint64_t now_ms)
         mgr->last_error = 0;
         mgr->play_count++;
         mgr->last_play_ms = now_ms;
+#if defined(ZVP_HOST_TEST) || defined(_WIN32)
+        mgr->last_wall_play_ms = 0u;
+#else
+        mgr->last_wall_play_ms = zvp_realtime_ms();
+#endif
         return true;
     }
     if (err != 0) {
@@ -1646,9 +1651,56 @@ static bool play_slot_internal(zvp_sound_mgr_t *mgr, uint64_t now_ms)
     return false;
 }
 
+/* UI/输入播放前检查：优先消费 display off→on 事件；否则在墙上时钟
+ * 相对 mono 出现大跳变时按 STR 处理。此时先复用 /tmp 里的 F0 重新
+ * 绑定槽位，避免复用已失效的 ADF 采样。 */
+static bool sound_resume_rebind_before_play(zvp_sound_mgr_t *mgr, uint64_t now_ms)
+{
+#if !defined(ZVP_HOST_TEST) && !defined(_WIN32)
+    if (zvp_runtime_take_display_resume()) {
+        if (zvp_sound_rebind_cached(mgr)) {
+            sound_logf("sound resume(display): re-bound cached slot=0x%02x bytes=%u",
+                       (unsigned)mgr->active_slot, (unsigned)mgr->last_f0_bytes);
+            return true;
+        }
+        zvp_sound_invalidate_cache(mgr);
+        return false;
+    }
+#endif
+
+    uint64_t wall = 0u;
+#if !defined(ZVP_HOST_TEST) && !defined(_WIN32)
+    wall = zvp_realtime_ms();
+#endif
+    if (wall == 0u || mgr->last_wall_play_ms == 0u ||
+        wall <= mgr->last_wall_play_ms) {
+        return true;
+    }
+    uint64_t wall_gap = wall - mgr->last_wall_play_ms;
+    uint64_t mono_gap = (now_ms >= mgr->last_play_ms)
+                            ? (now_ms - mgr->last_play_ms) : 0u;
+    if (wall_gap <= mono_gap + 1500u) {
+        return true;
+    }
+
+    if (!zvp_sound_rebind_cached(mgr)) {
+        zvp_sound_invalidate_cache(mgr);
+        return false;
+    }
+    sound_logf("sound resume(lazy): re-bound cached slot=0x%02x bytes=%u",
+               (unsigned)mgr->active_slot, (unsigned)mgr->last_f0_bytes);
+    return true;
+}
+
 bool zvp_sound_play_prepared(zvp_sound_mgr_t *mgr, uint64_t now_ms)
 {
-    if (!mgr || !mgr->prepared) {
+    if (!mgr) {
+        return false;
+    }
+    if (!sound_resume_rebind_before_play(mgr, now_ms)) {
+        return false;
+    }
+    if (!mgr->prepared) {
         return false;
     }
     return play_slot_internal(mgr, now_ms);
@@ -1659,12 +1711,89 @@ bool zvp_sound_play(zvp_sound_mgr_t *mgr, uint64_t now_ms)
     if (!mgr) {
         return false;
     }
+    if (!sound_resume_rebind_before_play(mgr, now_ms)) {
+        if (!zvp_sound_prepare_current(mgr)) {
+            return false;
+        }
+    }
     if (!mgr->prepared) {
         if (!zvp_sound_prepare_current(mgr)) {
             return false;
         }
     }
     return play_slot_internal(mgr, now_ms);
+}
+
+void zvp_sound_invalidate_cache(zvp_sound_mgr_t *mgr)
+{
+    if (!mgr) {
+        return;
+    }
+    /* STR 恢复后 DSP/ADF 的实际采样已失效，但 RAM 里的 SoundTable 名字
+     * 仍可能看起来有效。丢弃全部槽位缓存，迫使下一次 prepare 重新选槽
+     * 并让相机重新加载 /tmp/zvp_shutter.bin 到 ADF。 */
+    memset(mgr->slot_cache, 0, sizeof(mgr->slot_cache));
+    mgr->prepared = false;
+    mgr->last_error = 0;
+    __atomic_store_n(&g_remap_active, false, __ATOMIC_RELEASE);
+#if !defined(ZVP_HOST_TEST) && !defined(_WIN32)
+    zvp_sound_hook_reset();
+#endif
+}
+
+bool zvp_sound_rebind_cached(zvp_sound_mgr_t *mgr)
+{
+    if (!mgr || mgr->count == 0u || mgr->selected_idx >= mgr->count) {
+        return false;
+    }
+
+    /* 不重新读 SD/WAV：复用最后一次 prepare 生成的 F0 文件，只把槽位
+     * 重新绑定一次。这样 resume 首帧不会在 Fsys 未就绪时阻塞 UI 线程。 */
+    uint32_t f0_bytes = mgr->last_f0_bytes;
+    const zvp_sound_item_t *it = &mgr->items[mgr->selected_idx];
+    if (f0_bytes == 0u) {
+        for (uint32_t i = 0u; i < ZVP_SOUND_CACHE_SLOTS; i++) {
+            if (cache_matches_item(&mgr->slot_cache[i], it) &&
+                mgr->slot_cache[i].f0_bytes != 0u) {
+                f0_bytes = mgr->slot_cache[i].f0_bytes;
+                break;
+            }
+        }
+    }
+    if (f0_bytes == 0u) {
+        return false;
+    }
+
+#ifndef _WIN32
+    const char *bin_path = mgr->active_bin_path[0] ? mgr->active_bin_path
+                                                   : ZVP_SOUND_ACTIVE_BIN_PATH;
+    int fd = open(bin_path, O_RDONLY);
+    if (fd < 0) {
+        sound_logf("sound resume: cached f0 文件不存在 path=%s", bin_path);
+        return false;
+    }
+    off64_t size = lseek64(fd, 0, SEEK_END);
+    close(fd);
+    if (size < 0 || (uint64_t)size != (uint64_t)f0_bytes) {
+        sound_logf("sound resume: cached f0 大小不匹配 path=%s size=%lld expect=%u",
+                   bin_path, (long long)size, (unsigned)f0_bytes);
+        return false;
+    }
+#endif
+
+    zvp_sound_invalidate_cache(mgr);
+    uint8_t old_slot = mgr->active_slot;
+    uint8_t *sys_snd = __atomic_load_n(&g_sys_snd_data, __ATOMIC_ACQUIRE);
+    bool old_bound = sys_snd && is_slot_bound_by_us(sys_snd, old_slot);
+    if (old_bound) {
+        /* 回收旧槽位的 ADF 表项，避免每次 resume 都占用新的保留槽位。 */
+        unregist_and_clear_slot(sys_snd, old_slot);
+    }
+    mgr->last_f0_bytes = f0_bytes;
+    pick_and_bind_slot_for_item(mgr, it, f0_bytes);
+    mgr->prepared = true;
+    mgr->last_error = 0;
+    return true;
 }
 
 void zvp_sound_reset(zvp_sound_mgr_t *mgr)
@@ -1713,6 +1842,7 @@ void zvp_sound_reset(zvp_sound_mgr_t *mgr)
     mgr->last_error = 0;
     mgr->play_count = 0u;
     mgr->last_play_ms = 0u;
+    mgr->last_wall_play_ms = 0u;
 
     uint32_t default_idx = 0u;
     for (uint32_t i = 0u; i < mgr->count; ++i) {
