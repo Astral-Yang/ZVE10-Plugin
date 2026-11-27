@@ -120,8 +120,16 @@ def cmd_stage_tmp(so_path: str) -> int:
     if not os.path.exists(so_path):
         print(f"[错误] 找不到共享库文件: {so_path}")
         return 1
-    print("[1/3] 解除旧目标文件链接（避免覆写已映射只读页）...")
-    _ = run_cam(["sh", "rm -f /tmp/libzve10plugin.so /tmp/zve10plugin.log"])
+    print("[1/3] 解除旧目标文件链接并清理上次失败的临时文件...")
+    removed = run_cam(["sh",
+                       "rm -f /tmp/libzve10plugin.so /tmp/libzve10plugin.so.* /tmp/zve10plugin.log; "
+                       ": > /tmp/kikilog.dat 2>/dev/null || true; "
+                       "echo '--- /tmp after cleanup ---'; busybox df -h /tmp 2>/dev/null || true; "
+                       "ls -lah /tmp 2>/dev/null | busybox tail -n 30"])
+    print(removed.stdout)
+    if removed.returncode != 0:
+        print(removed.stderr)
+        return removed.returncode
     print(f"[2/3] 推送 {so_path} -> /tmp/libzve10plugin.so ...")
     res = run_cam(["put", so_path, "/tmp/libzve10plugin.so"])
     print(res.stdout)
