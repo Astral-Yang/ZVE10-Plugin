@@ -10,6 +10,8 @@ __asm__(".symver dlsym, dlsym@GLIBC_2.4");
 
 #if !defined(ZVP_HOST_TEST) && !defined(_WIN32)
 extern void zvp_logf(const char *fmt, ...);
+extern void zvp_capture_probe_on_osal(uintptr_t lr, const char *tag,
+                                      uint32_t msg_id, const uint8_t *data, uint32_t len);
 #endif
 
 extern bool zvp_sound_has_active_remap(void);
@@ -259,6 +261,8 @@ int _ZN11ObjAvbbcCmn10OsalSndMsgEjPKhj(void *self, unsigned int msg_id,
 
     int rc = fn ? fn(self, msg_id, send_data, len) : -1;
 #if !defined(ZVP_HOST_TEST) && !defined(_WIN32)
+    zvp_capture_probe_on_osal((uintptr_t)__builtin_return_address(0), "Osal",
+                              msg_id, send_data, len);
     if (data && ((msg_id & 0x0fffffffu) == 0x0058003fu ||
                  (msg_id & 0x0fffffffu) == 0x0061003cu) && len >= 4u) {
         unsigned int mid_low = (msg_id & 0x0fffffffu);

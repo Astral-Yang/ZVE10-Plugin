@@ -4,6 +4,10 @@
 #include "zvp_core.h"
 #include "zvp_abi.h"
 #include "zvp_sound.h"
+#include "zvp_aspect.h"
+#include "zvp_craw.h"
+#include "zvp_lut.h"
+#include "zvp_menu_touch.h"
 #include "lvgl.h"
 
 #ifdef __cplusplus
@@ -40,6 +44,11 @@ typedef struct zvp_native_bridge {
 
 int zvp_bridge_init_platform(zvp_wifi5g_platform_ops_t *out_wifi_ops,
                              zvp_gate_ops_t *out_gate_ops);
+int zvp_bridge_init_craw_ops(zvp_craw_platform_ops_t *out_craw_ops);
+int zvp_bridge_init_lut_ops(zvp_lut_platform_ops_t *out_lut_ops);
+int zvp_bridge_init_menu_touch_ops(zvp_menu_touch_ops_t *out_ops);
+bool zvp_runtime_should_handle_native_touch(void);
+void zvp_bridge_cleanup_internal_drive_b(void);
 int zvp_bridge_ensure_ticker(zvp_native_bridge_t *br);
 void zvp_bridge_stop_ticker(zvp_native_bridge_t *br);
 int zvp_bridge_ensure_canvas(zvp_native_bridge_t *br);
@@ -84,18 +93,25 @@ void zvp_lvgl_port_push_key(zvp_lvgl_port_t *port, uint32_t lv_key);
 #define ZVP_MINI_WIDGET_H 46
 
 typedef enum {
-    ZVP_PAGE_CREATIVE_LOOK = 0,
-    ZVP_PAGE_LUT = 1,
-    ZVP_PAGE_WIFI5G = 2,
-    ZVP_PAGE_FILE_SHARE = 3,
-    ZVP_PAGE_CUSTOM_SHUTTER = 4,
-    ZVP_PAGE_COLOR_CAL = 5,
-    ZVP_PAGE_ASPECT_RATIO = 6,
-    ZVP_PAGE_USB_REC = 7,
-    ZVP_PAGE_1080P_OVERSAMPLE = 8,
+    ZVP_PAGE_LUT = 0,
+    ZVP_PAGE_WIFI5G = 1,
+    ZVP_PAGE_FILE_SHARE = 2,
+    ZVP_PAGE_CUSTOM_SHUTTER = 3,
+    ZVP_PAGE_COLOR_CAL = 4,
+    ZVP_PAGE_ASPECT_RATIO = 5,
+    ZVP_PAGE_USB_REC = 6,
+    ZVP_PAGE_1080P_OVERSAMPLE = 7,
+    ZVP_PAGE_2K_CRAW = 8,
     ZVP_PAGE_SETTINGS = 9,
     ZVP_PAGE_COUNT
 } zvp_ui_page_t;
+
+typedef enum {
+    ZVP_LUT_CAT_SONY = 0,
+    ZVP_LUT_CAT_FUJI = 1,
+    ZVP_LUT_CAT_RICOH = 2,
+    ZVP_LUT_CAT_COUNT = 3
+} zvp_lut_cat_e;
 
 typedef struct zvp_ui {
     bool built;
@@ -142,6 +158,40 @@ typedef struct zvp_ui {
     lv_obj_t *lbl_mini_play;
     lv_obj_t *btn_mini_next;
 
+    /* 自定义纵横比页控件 */
+    lv_obj_t *btn_aspect_enable;
+    lv_obj_t *badge_aspect_enable;
+    lv_obj_t *lbl_aspect_badge;
+    lv_obj_t *lbl_aspect_status;
+    lv_obj_t *aspect_grid;
+    lv_obj_t *aspect_btns[ZVP_ASPECT_PRESET_COUNT];
+    lv_obj_t *btn_aspect_style;
+    lv_obj_t *lbl_aspect_style;
+    lv_obj_t *btn_aspect_guide;
+    lv_obj_t *lbl_aspect_guide;
+    lv_obj_t *btn_aspect_par;
+    lv_obj_t *lbl_aspect_par;
+
+    /* 实时取景纵横比遮罩底层容器（位于菜单/小悬浮窗之下） */
+    lv_obj_t *aspect_layer;
+    lv_obj_t *aspect_bars[4];   /* top, bottom, left, right */
+    lv_obj_t *aspect_frame_box; /* 中空构图外框线 */
+    lv_obj_t *aspect_thirds[4]; /* 三分构图线（2 竖 2 横） */
+
+    /* 2K cRAW 纯内存录制页控件 */
+    lv_obj_t *btn_craw_mode;
+    lv_obj_t *badge_craw_mode;
+    lv_obj_t *lbl_craw_mode_badge;
+    lv_obj_t *lbl_craw_mode_desc;
+    lv_obj_t *btn_craw_pool;
+    lv_obj_t *lbl_craw_pool;
+    lv_obj_t *btn_craw_snap;
+    lv_obj_t *lbl_craw_snap;
+    lv_obj_t *btn_craw_uninstall;
+    lv_obj_t *lbl_craw_uninstall;
+    lv_obj_t *lbl_craw_telem_1;
+    lv_obj_t *lbl_craw_telem_2;
+
     /* 设置与安全页控件 */
     lv_obj_t *btn_c1_mode;
     lv_obj_t *badge_c1_mode;
@@ -150,15 +200,44 @@ typedef struct zvp_ui {
     lv_obj_t *badge_auto_flip;
     lv_obj_t *lbl_auto_flip_badge;
     lv_obj_t *lbl_flip_state;
+    lv_obj_t *btn_native_touch;
+    lv_obj_t *badge_native_touch;
+    lv_obj_t *lbl_native_touch_badge;
+    lv_obj_t *lbl_native_touch_state;
     lv_obj_t *btn_recovery;
     lv_obj_t *lbl_recovery;
     lv_obj_t *lbl_gate_info;
+
+    /* 自定义 LUT 独立顶部横栏(关闭/品牌/SD卡导入) + 窄竖向列表 + 右下独立微调浮块 */
+    lv_obj_t *lut_top_layer;
+    lv_obj_t *btn_lut_off;
+    lv_obj_t *btn_lut_sd;
+    lv_obj_t *lut_cat_btns[ZVP_LUT_CAT_COUNT];
+    uint8_t   lut_cat;
+    uint8_t   lut_visible_count;
+    uint8_t   lut_row_slots[ZVP_LUT_NUM_SLOTS];
+    lv_obj_t *lut_list;
+    lv_obj_t *lut_row_btns[ZVP_LUT_NUM_SLOTS];
+    lv_obj_t *lut_row_badges[ZVP_LUT_NUM_SLOTS];
+
+    bool              lut_sd_mode;
+    uint8_t           lut_sd_count;
+    bool              lut_sd_has_card_files;
+    zvp_lut_sd_item_t lut_sd_items[ZVP_LUT_SD_MAX_ITEMS];
+
+    bool            lut_fine_visible;
+    zvp_lut_param_t lut_fine_param;
+    lv_obj_t       *lut_fine_layer;
+    lv_obj_t       *btn_lut_fine_reset;
+    lv_obj_t       *lut_param_btns[ZVP_LUT_PARAM_COUNT];
+    lv_obj_t       *lut_param_vals[ZVP_LUT_PARAM_COUNT];
 } zvp_ui_t;
 
 void zvp_ui_build(zvp_ui_t *ui);
 void zvp_ui_refresh(zvp_ui_t *ui);
 void zvp_ui_switch_page(zvp_ui_t *ui, zvp_ui_page_t page);
 void zvp_ui_set_visible(zvp_ui_t *ui, bool visible);
+void zvp_ui_set_lut_fine_mode(zvp_ui_t *ui, bool enable);
 void zvp_ui_sync_overlay(zvp_ui_t *ui);
 bool zvp_ui_handle_nav_key(zvp_ui_t *ui, uint32_t act_mask);
 
@@ -207,6 +286,14 @@ typedef struct zvp_runtime {
     volatile uint32_t kl_tail;
     volatile bool touch_dirty;
     volatile bool flip_dirty;
+    volatile bool aspect_hw_dirty;
+    volatile int16_t pending_vdf_x;
+    volatile int16_t pending_vdf_y;
+    volatile int16_t pending_vdf_w;
+    volatile int16_t pending_vdf_h;
+    volatile bool pending_vdf_valid;
+    volatile bool pending_panel_valid;
+    volatile uint8_t pending_panel_raw[2];
     int16_t diag_last_tp_x;
     int16_t diag_last_tp_y;
     uint32_t diag_last_key_w0;
@@ -214,8 +301,14 @@ typedef struct zvp_runtime {
     zvp_wifi5g_ctx_t wifi;
     zvp_recovery_ctx_t rec;
     zvp_sound_mgr_t sound;
+    zvp_aspect_ctx_t aspect;
+    zvp_craw_ctx_t craw;
+    zvp_lut_ctx_t lut;
+    uint32_t lut_last_nonzero_sel;
+    uint64_t lut_cfg_dirty_ms;
     bool shutter_sound_enabled;
     bool mini_widget_enabled;
+    bool native_menu_touch_enabled;
     uint64_t last_shutter_trig_ms;
     zvp_input_state_t input;
     zvp_native_bridge_t bridge;

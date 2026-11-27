@@ -92,7 +92,7 @@ uv run python tools/probe_zve10_runtime.py --cam-py <path-to-cam.py> --check
 uv run python tools/probe_zve10_runtime.py --stage-tmp
 ```
 
-确认输出末尾显示 `/tmp/libzve10plugin.so` 权限为 `-rwxr-xr-x` 且大小约 500KB 左右。
+确认输出末尾显示 `/tmp/libzve10plugin.so` 权限为 `-rwxr-xr-x` 且大小约 900KB 左右。
 
 ### Step 4：启用 `preload` 注入引导
 
@@ -118,9 +118,10 @@ uv run python tools/probe_zve10_runtime.py --reboot; if ($LASTEXITCODE -eq 0) { 
 
 随后即可提醒用户在相机上按 **C1 键** 打开插件菜单。
 
-### Step 6（可选）：导入示例快门音效到 SD 卡
+### Step 6（可选）：导入示例快门音效与自定义 LUT 滤镜包到 SD 卡
 
-若用户希望立刻体验自定义快门音，可引导用户将 `assets/sounds/` 中的 `.WAV` 文件复制到 SD 卡 `/PRIVATE/M4ROOT/GENERAL/SOUNDS/` 目录下（或直接协助复制至已挂载的 SD 卡盘符下该目录）。
+- **自定义快门音**：将 `assets/sounds/` 中的 `.WAV` 文件复制到 SD 卡 `/PRIVATE/M4ROOT/GENERAL/SOUNDS/` 目录下。
+- **自定义 LUT 滤镜包**：将 `ZVLOOK01` 格式的 `.bin` 滤镜包复制到 SD 卡 `/ZVC/` 或 `/PRIVATE/SONY/PRO/LUT/` 目录下，在插件「滤镜」页点击顶栏 `SD导入` 图标即可热加载。
 
 ---
 

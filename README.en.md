@@ -28,6 +28,15 @@ Non-destructive · Clean semi-transparent menu · Instant safe rollback
 > [!NOTE]
 > This plugin is under active development. Released features have been verified on real camera hardware; other entries in the menu are placeholders for upcoming updates.
 
+- **🎨 Custom Film Filters (LUT) · 7-Axis Fine-Tuning & SD Hot-Import**  
+  Ships with 17 calibrated film presets across Sony (`ST`/`PT`/`NT`/`FL`/`FL2`/`FL3`/`IN`/`SH`), Fuji (`ClassicChrome`/`ClassicNeg`/`Astia`/`Velvia`, etc.), and Ricoh (`GR_Positive`/`GR_Negative`). Supports brand filtering, real-time 7-axis adjustment (Strength, Contrast, Highlights, Shadows, Fade, Saturation, Sharpness), and hot-importing `ZVLOOK01` `.bin` bundles from `ZVC\` on the SD card.
+
+- **👆 Full Native Menu & Fn Touch Control (MTF2)**  
+  Brings native touch navigation to the Gen 1 ZV-E10 stock UI: tap tabs and page dots, swipe horizontally to turn pages, tap rows to select/open level-2 popups (tap to apply, vertical swipe to scroll, tap outside to dismiss), and tap any tile in the 2×6 **Fn** grid. Can be toggled on/off anytime in Settings.
+
+- **📐 Aspect Ratio Guides · 12 Framing Presets**  
+  Non-destructive live-view framing masks (`2.39:1`, `2.35:1`, `16:9`, `4:3`, `1:1`, `9:16`, etc.) with adjustable mask opacity and rule-of-thirds overlay lines.
+
 - **📶 5GHz Wi-Fi Unlock · Faster Transfers**  
   Break free from the stock 2.4GHz speed cap. Enable 5GHz Wi-Fi with one tap and choose between `Auto` or 9 channels (`36, 40, 44, 48, 149, 153, 157, 161, 165`) for faster, more reliable transfers to your phone or computer.
 
@@ -77,24 +86,36 @@ Non-destructive · Clean semi-transparent menu · Instant safe rollback
 > [!TIP]
 > **Audio Requirements**: Use standard **uncompressed PCM WAV** files (`8/16/24/32-bit`, mono or stereo, `8000–192000 Hz`). Keep each file **under 1 MB and 5 seconds** (`0.1s – 1.5s` works best for continuous shooting).
 
+### 3. Hot-Importing Custom LUT Bundles
+1. Copy `ZVLOOK01`-formatted `.bin` filter bundles onto your SD card under either folder (the first path is recommended):
+   ```text
+   /ZVC/
+   /PRIVATE/SONY/PRO/LUT/
+   ```
+2. Open the **Filter (滤镜)** tab in the plugin menu and tap the **SD Import icon** on the far right of the top bar to scan, validate, and hot-load custom bundles, or select **内置默认** at the bottom of the list to revert to the built-in 17 looks anytime.
+
+### 4. Native Stock Menu & Fn Touch Control
+- Whenever the plugin overlay is hidden, you can directly touch and swipe the stock **MENU** (tabs, page dots, horizontal swipe paging, rows, level-2 popups) and **Fn** 2×6 quick tiles.
+- You can toggle **原厂菜单/Fn触控 (Native Menu/Fn Touch)** on or off anytime inside **Settings (设置)**.
+
 ---
 
 ## 📋 Feature Roadmap
 
-The main menu has **10 slots**. Core safety tools and 3 major modules are ready to use, while the remaining entries are reserved for future releases:
+The main menu contains **10 entries**. **Filter (Creative Look + LUT)**, **5G WiFi**, **Shutter Sound**, **Aspect Ratio**, and **Settings (including Native Menu/Fn Touch)** are ready for daily use:
 
 | # | Menu Entry | Status | Description |
 | :---: | :--- | :---: | :--- |
-| 1 | **Creative Look** | 🚧 Planned | Reserved menu slot; coming in a future update |
-| 2 | **LUT** | 🚧 Planned | Reserved menu slot; coming in a future update |
-| 3 | **5GHz WIFI** | ✅ Ready | One-tap 5GHz unlock with `Auto` and 9 selectable channels |
-| 4 | **File Sharing** | 🚧 Planned | Reserved menu slot; planned for LAN / FTP photo transfer |
-| 5 | **Shutter Sound** | ✅ Ready | 2 built-in presets, SD card WAV support, and shooting mini widget |
-| 6 | **Color Calibration** | 🚧 Planned | Reserved menu slot; coming in a future update |
-| 7 | **Aspect Ratio** | 🚧 Planned | Reserved menu slot; planned for custom frame guides |
-| 8 | **USB Recording** | 🚧 Planned | Reserved menu slot; coming in a future update |
-| 9 | **1080p Oversampling** | 🚧 Planned | Reserved menu slot; coming in a future update |
-| 10 | **Settings & Safety** | ✅ Ready | C1 trigger mode, 180° flip adaptation, and full safe reset |
+| 1 | **Filter (`滤镜`)** | ✅ Ready | Creative Look + LUT unified: 17 Sony/Fuji/Ricoh presets, 7-axis tuning, SD `.bin` hot-import |
+| 2 | **5G WiFi** | ✅ Ready | One-tap 5GHz unlock with `Auto` and 9 selectable channels |
+| 3 | **Share (`共享`)** | 🚧 Planned | Reserved menu slot; planned for LAN / FTP photo transfer |
+| 4 | **Shutter Sound (`快门音`)** | ✅ Ready | 2 built-in presets, SD card WAV support, and shooting mini widget |
+| 5 | **Color Cal (`校色`)** | 🚧 Planned | Reserved menu slot; coming in a future update |
+| 6 | **Aspect Ratio (`比例`)** | ✅ Ready | 12 framing ratio masks, adjustable opacity, and rule-of-thirds guides |
+| 7 | **USB Rec (`外录`)** | 🚧 Planned | Reserved menu slot; coming in a future update |
+| 8 | **Oversampling (`超采`)** | 🚧 Planned | Reserved menu slot; coming in a future update |
+| 9 | **2K cRAW (`cRAW`)** | 🧪 Experimental | Experimental 2K in-memory cRAW test controls and telemetry |
+| 10 | **Settings (`设置`)** | ✅ Ready | C1 trigger mode, 180° flip adaptation, Native Menu/Fn touch toggle, and full safe reset |
 
 ---
 
@@ -184,11 +205,14 @@ uv run python tools/probe_zve10_runtime.py --disable-preload
 ```text
 ZVE10-Plugin/
 ├── .agents/skills/         # AI Agent automated install & troubleshooting skill
-├── assets/sounds/          # Sample WAV shutter sounds & placement guide
-├── cmake/                  # Cross-build toolchain & version scripts
-├── docs/assets/            # Static image assets
-├── include/                # Core headers
-├── prebuilt/               # Prebuilt camera shared library (libzve10plugin.so)
+├── assets/
+│   ├── lut/              # Custom LUT kernel module & default look bundle
+│   └── sounds/           # Sample WAV shutter sounds & placement guide
+├── cmake/                # Cross-build toolchain & version scripts
+├── docs/assets/          # Static image assets
+├── include/              # Core headers
+├── liro/                 # 2K in-memory cRAW hook assembly & linker script
+├── prebuilt/             # Prebuilt camera shared library (libzve10plugin.so)
 ├── src/                    # Plugin sources & generated UI fonts
 ├── tests/                  # Host unit tests
 ├── third_party/
@@ -236,6 +260,8 @@ This project builds on the research and open-source contributions of:
 | [Erlla/sony-a7m4-custom-firmware](https://github.com/erlla/sony-a7m4-custom-firmware) | `GPL-3.0` | Sony audio encoding, sample WAV sounds, and LUT research |
 | [nolan2628/ZVE10-Astra-Public](https://github.com/nolan2628/ZVE10-Astra-Public) | `MIT` | ZV-E10 on-screen overlay rendering and input foundation |
 | [dino2048/ZV-E10-5GHz-WiFi-Unlock](https://github.com/dino2048/ZV-E10-5GHz-WiFi-Unlock) | `MIT` | Gen 1 ZV-E10 native 5GHz Wi-Fi & channel unlock reference |
+| [dino2048/ZV-E10-Custom-LUT](https://github.com/dino2048/ZV-E10-Custom-LUT) | `See repo` | Gen 1 ZV-E10 `zvc_fl4` kernel LUT protocol & `ZVLOOK01` bundle specification |
+| [ivica00/bionz-x-research](https://github.com/ivica00/bionz-x-research) | `See repo` | ZV-E10 native MENU & Fn touch integration (`MTF2`) RE and port reference |
 | [nolan2628/Sony-ZVE-10-Camtool](https://github.com/nolan2628/Sony-ZVE-10-Camtool) | `See repo` | ZV-E10 USB service-mode debugger, file staging, and reboot toolkit (`third_party/camtool` submodule) |
 | [ma1co/Sony-PMCA-RE](https://github.com/ma1co/Sony-PMCA-RE) | `MIT` | Sony USB MSC/Senser authentication & transport library (`third_party/pmca` submodule) |
 | [lvgl/lvgl](https://github.com/lvgl/lvgl) | `MIT` | Lightweight embedded UI library powering the overlay menu |

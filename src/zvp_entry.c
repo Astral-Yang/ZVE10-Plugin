@@ -1,5 +1,6 @@
 #define _GNU_SOURCE
 #include "zvp_runtime.h"
+#include "zvp_capture_probe.h"
 
 #include <dlfcn.h>
 #include <fcntl.h>
@@ -62,6 +63,13 @@ bool zvp_runtime_is_bypassed(void)
     return should_bypass_all();
 }
 
+bool zvp_runtime_should_handle_native_touch(void)
+{
+    return g_rt.plugin_active && !g_rt.shutting_down && !should_bypass_all() &&
+           g_rt.native_menu_touch_enabled &&
+           !g_rt.input.menu_visible && !g_rt.input.mini_touch_active;
+}
+
 static int plat_bg_read_file(const char *path, void *buf, size_t cap, size_t *out_len)
 {
     if (!path || !buf || cap == 0u) {
@@ -111,7 +119,8 @@ static const zvp_boot_guard_ops_t s_bg_ops = {
 #define ZVP_PREFS_PATH       "/tmp/zvp_prefs.bin"
 #define ZVP_PREFS_MAGIC      0x5A565031u
 #define ZVP_PREFS_VERSION_V1 1u
-#define ZVP_PREFS_VERSION    2u
+#define ZVP_PREFS_VERSION_V2 2u
+#define ZVP_PREFS_VERSION    3u
 
 typedef struct zvp_prefs_disk_v1 {
     uint32_t magic;
@@ -128,6 +137,23 @@ typedef struct zvp_prefs_disk_v1 {
     uint8_t  reserved[2];
 } zvp_prefs_disk_v1_t;
 
+typedef struct zvp_prefs_disk_v2 {
+    uint32_t magic;
+    uint32_t version;
+    uint8_t  wifi5g_enabled;
+    uint8_t  selected_channel;
+    uint8_t  c1_mode;
+    uint8_t  auto_flip;
+    uint8_t  orig_saved;
+    uint8_t  orig_nvram_go;
+    uint8_t  orig_nvram_sta;
+    uint8_t  orig_band_menu;
+    uint8_t  orig_ap_ch_band[2];
+    uint8_t  shutter_sound_enabled;
+    uint8_t  mini_widget_enabled;
+    char     sound_name[ZVP_SOUND_NAME_LEN];
+} zvp_prefs_disk_v2_t;
+
 typedef struct zvp_prefs_disk {
     uint32_t magic;
     uint32_t version;
@@ -143,6 +169,12 @@ typedef struct zvp_prefs_disk {
     uint8_t  shutter_sound_enabled;
     uint8_t  mini_widget_enabled;
     char     sound_name[ZVP_SOUND_NAME_LEN];
+    uint8_t  aspect_enabled;
+    uint8_t  aspect_preset;
+    uint8_t  aspect_style;
+    uint8_t  aspect_guide;
+    uint8_t  aspect_par_mode;
+    uint8_t  aspect_reserved[3];
 } zvp_prefs_disk_t;
 
 void zvp_runtime_save_prefs(void)
@@ -164,6 +196,12 @@ void zvp_runtime_save_prefs(void)
     cfg.shutter_sound_enabled = g_rt.shutter_sound_enabled ? 1u : 0u;
     cfg.mini_widget_enabled = g_rt.mini_widget_enabled ? 1u : 0u;
     snprintf(cfg.sound_name, sizeof(cfg.sound_name), "%s", g_rt.sound.selected_name);
+    cfg.aspect_enabled = g_rt.aspect.enabled ? 1u : 0u;
+    cfg.aspect_preset = g_rt.aspect.preset_idx;
+    cfg.aspect_style = (uint8_t)g_rt.aspect.style;
+    cfg.aspect_guide = (uint8_t)g_rt.aspect.guide;
+    cfg.aspect_par_mode = (uint8_t)g_rt.aspect.par_mode;
+    cfg.aspect_reserved[0] = g_rt.native_menu_touch_enabled ? 0u : 1u;
 
     int fd = open(ZVP_PREFS_PATH, O_WRONLY | O_CREAT | O_TRUNC, 0644);
     if (fd >= 0) {
@@ -191,14 +229,20 @@ static int zvp_runtime_full_reset_cb(void *user_data)
     rt->last_shutter_trig_ms = 0u;
     zvp_sound_reset(&rt->sound);
 
-    /* 2. 回退输入按键模式与屏幕翻转自适应至插件默认状态 */
+    /* 2. 回退 2K cRAW、自定义 LUT、纵横比遮罩、输入按键模式与屏幕翻转自适应至插件默认状态 */
+    (void)zvp_lut_shutdown_reset(&rt->lut);
+    zvp_craw_shutdown(&rt->craw);
+    zvp_aspect_reset_defaults(&rt->aspect);
     zvp_input_set_c1_mode(&rt->input, ZVP_C1_MODE_SHORT_EXCLUSIVE);
     zvp_input_set_auto_flip(&rt->input, true);
+    rt->native_menu_touch_enabled = false;
+    zvp_menu_touch_uninstall();
 
-    /* 3. 清除持久化偏好配置文件 */
+    /* 3. 清除持久化偏好配置文件并同步叠加层显隐 */
     zvp_runtime_reset_prefs();
+    zvp_ui_sync_overlay(&rt->ui);
 
-    zvp_logf("全量安全复位完成: 已清除快门音/悬浮窗/输入配置与持久化文件");
+    zvp_logf("全量安全复位完成: 已清除快门音/悬浮窗/纵横比/输入配置与持久化文件");
     return 0;
 }
 
@@ -216,7 +260,8 @@ static void load_prefs_and_apply(void)
         return;
     }
     if (cfg.version != ZVP_PREFS_VERSION_V1 &&
-        (cfg.version != ZVP_PREFS_VERSION || n != (ssize_t)sizeof(cfg))) {
+        !(cfg.version == ZVP_PREFS_VERSION_V2 && n == (ssize_t)sizeof(zvp_prefs_disk_v2_t)) &&
+        !(cfg.version == ZVP_PREFS_VERSION && n == (ssize_t)sizeof(cfg))) {
         return;
     }
 
@@ -246,13 +291,31 @@ static void load_prefs_and_apply(void)
         (void)zvp_wifi5g_set_enabled(&g_rt.wifi, true);
     }
 
-    if (cfg.version == ZVP_PREFS_VERSION) {
+    if (cfg.version >= ZVP_PREFS_VERSION_V2) {
         g_rt.shutter_sound_enabled = (cfg.shutter_sound_enabled != 0u);
         g_rt.mini_widget_enabled = (cfg.mini_widget_enabled != 0u);
         cfg.sound_name[sizeof(cfg.sound_name) - 1u] = '\0';
         if (cfg.sound_name[0]) {
             (void)zvp_sound_select_by_name(&g_rt.sound, cfg.sound_name);
         }
+    }
+    if (cfg.version >= ZVP_PREFS_VERSION) {
+        if (cfg.aspect_preset < ZVP_ASPECT_PRESET_COUNT) {
+            zvp_aspect_select_preset(&g_rt.aspect, cfg.aspect_preset);
+        }
+        if (cfg.aspect_style < (uint8_t)ZVP_ASPECT_STYLE_COUNT) {
+            g_rt.aspect.style = (zvp_aspect_style_t)cfg.aspect_style;
+        }
+        if (cfg.aspect_guide < (uint8_t)ZVP_ASPECT_GUIDE_COUNT) {
+            g_rt.aspect.guide = (zvp_aspect_guide_t)cfg.aspect_guide;
+        }
+        if (cfg.aspect_par_mode < (uint8_t)ZVP_ASPECT_PAR_COUNT) {
+            g_rt.aspect.par_mode = (zvp_aspect_par_mode_t)cfg.aspect_par_mode;
+        }
+        zvp_aspect_set_enabled(&g_rt.aspect, cfg.aspect_enabled != 0u);
+        zvp_aspect_recompute(&g_rt.aspect, zvp_input_is_ui_rotated_180(&g_rt.input));
+        g_rt.native_menu_touch_enabled = (cfg.aspect_reserved[0] == 0u);
+        zvp_menu_touch_set_enabled(g_rt.native_menu_touch_enabled);
     }
     if ((g_rt.shutter_sound_enabled || g_rt.mini_widget_enabled) && !g_rt.sound.prepared) {
         (void)zvp_sound_prepare_current(&g_rt.sound);
@@ -266,13 +329,15 @@ static void rollback_state_on_gate_block(zvp_gate_status_t st,
     memset(&cfg, 0, sizeof(cfg));
     int fd = open(ZVP_PREFS_PATH, O_RDONLY);
     bool has_cfg = false;
+    ssize_t read_len = 0;
     if (fd >= 0) {
-        ssize_t n = read(fd, &cfg, sizeof(cfg));
+        read_len = read(fd, &cfg, sizeof(cfg));
         close(fd);
-        if (n >= (ssize_t)sizeof(zvp_prefs_disk_v1_t) &&
+        if (read_len >= (ssize_t)sizeof(zvp_prefs_disk_v1_t) &&
             cfg.magic == ZVP_PREFS_MAGIC &&
             (cfg.version == ZVP_PREFS_VERSION_V1 ||
-             (cfg.version == ZVP_PREFS_VERSION && n == (ssize_t)sizeof(cfg)))) {
+             (cfg.version == ZVP_PREFS_VERSION_V2 && read_len == (ssize_t)sizeof(zvp_prefs_disk_v2_t)) ||
+             (cfg.version == ZVP_PREFS_VERSION && read_len == (ssize_t)sizeof(cfg)))) {
             has_cfg = true;
         }
     }
@@ -293,7 +358,9 @@ static void rollback_state_on_gate_block(zvp_gate_status_t st,
             cfg.wifi5g_enabled = 0u;
             size_t wr_len = (cfg.version == ZVP_PREFS_VERSION_V1)
                                 ? sizeof(zvp_prefs_disk_v1_t)
-                                : sizeof(cfg);
+                                : ((cfg.version == ZVP_PREFS_VERSION_V2)
+                                       ? sizeof(zvp_prefs_disk_v2_t)
+                                       : sizeof(cfg));
             (void)plat_bg_write_file(ZVP_PREFS_PATH, &cfg, wr_len);
         }
     } else if (st == ZVP_GATE_DISABLED_KILL_FILE) {
@@ -365,19 +432,46 @@ static void ensure_boot_evaluated_ui_thread(uint64_t now)
         }
     }
 
+    zvp_craw_platform_ops_t cops;
+    zvp_bridge_init_craw_ops(&cops);
+    zvp_craw_init(&g_rt.craw, &cops);
+    zvp_bridge_cleanup_internal_drive_b();
+
     zvp_wifi5g_init(&g_rt.wifi, &wops);
     zvp_recovery_init(&g_rt.rec);
     zvp_recovery_set_full_reset_cb(&g_rt.rec, zvp_runtime_full_reset_cb, &g_rt);
     zvp_sound_init(&g_rt.sound);
+    zvp_aspect_init(&g_rt.aspect);
+
+    zvp_lut_platform_ops_t lops;
+    zvp_bridge_init_lut_ops(&lops);
+    zvp_lut_init(&g_rt.lut, &lops);
+    int lut_boot_rc = zvp_lut_boot_activate(&g_rt.lut);
+    g_rt.lut_last_nonzero_sel = (g_rt.lut.active_sel > 0u) ? g_rt.lut.active_sel : 1u;
+    zvp_logf("[lut] boot activate rc=%d slots=%u active_sel=%u kmod=%d preview=%d",
+             lut_boot_rc, (unsigned)g_rt.lut.num_slots,
+             (unsigned)g_rt.lut.active_sel,
+             g_rt.lut.kmod_loaded ? 1 : 0,
+             g_rt.lut.last_preview.rc);
+
     zvp_input_init(&g_rt.input, c1_code);
+    g_rt.native_menu_touch_enabled = true;
     load_prefs_and_apply();
+
+    if (g_rt.native_menu_touch_enabled) {
+        zvp_menu_touch_ops_t mops;
+        if (zvp_bridge_init_menu_touch_ops(&mops) == 0) {
+            (void)zvp_menu_touch_init(&mops);
+        }
+    }
+    zvp_menu_touch_set_enabled(g_rt.native_menu_touch_enabled);
 
     zvp_bridge_ensure_canvas(&g_rt.bridge);
 
     __sync_synchronize();
     g_rt.active_since_ms = now;
     g_rt.plugin_active = true;
-    if (g_rt.mini_widget_enabled) {
+    if (g_rt.mini_widget_enabled || g_rt.aspect.enabled) {
         zvp_ui_sync_overlay(&g_rt.ui);
     }
     zvp_logf("zve10plugin UI主线程激活成功: tid=%ld c1_key=0x%x canvas=%d sounds=%u",
@@ -411,6 +505,7 @@ __attribute__((destructor))
 static void zvp_on_process_exit(void)
 {
     g_rt.shutting_down = true;
+    zvp_craw_shutdown(&g_rt.craw);
     if (!g_rt.boot_tripped && g_rt.boot_evaluated && !g_rt.guard_cleared) {
         zvp_boot_guard_mark_healthy(&s_bg_ops, ZVP_BOOT_GUARD_PATH);
         g_rt.guard_cleared = true;
@@ -427,12 +522,14 @@ void zvp_runtime_handle_action_mask(uint32_t act_mask)
                  g_rt.input.menu_visible ? 1 : 0,
                  g_rt.bridge.canvas_ready ? 1 : 0);
         if (!g_rt.input.menu_visible) {
+            (void)zvp_lut_flush_pending_cfg(&g_rt.lut);
             g_rt.lvgl.cur_touch_pressed = false;
             g_rt.tp_head = g_rt.tp_tail;
         }
         zvp_ui_set_visible(&g_rt.ui, g_rt.input.menu_visible);
     } else if (act_mask & ZVP_ACT_CLOSE_MENU) {
         zvp_logf("menu_close -> visible=0");
+        (void)zvp_lut_flush_pending_cfg(&g_rt.lut);
         g_rt.lvgl.cur_touch_pressed = false;
         g_rt.tp_head = g_rt.tp_tail;
         zvp_ui_set_visible(&g_rt.ui, false);
@@ -458,6 +555,9 @@ void zvp_runtime_on_animate(void)
     }
 
     uint64_t now = zvp_monotonic_ms();
+
+    /* 排空静态拍照管线只读测绘探针日志 */
+    zvp_capture_probe_drain_logs();
 
     /* 0. 在 UI 主线程安全打印菜单开启期按键诊断码（限前 256 条，屏蔽陀螺仪/姿态传感器刷屏） */
     static uint32_t s_kl_logs = 0;
@@ -536,6 +636,74 @@ void zvp_runtime_on_animate(void)
         flip_pending = true;
     }
 
+    bool aspect_need_sync = false;
+    if (g_rt.aspect_hw_dirty) {
+        g_rt.aspect_hw_dirty = false;
+        if (g_rt.pending_vdf_valid) {
+            int16_t vx = g_rt.pending_vdf_x;
+            int16_t vy = g_rt.pending_vdf_y;
+            int16_t vw = g_rt.pending_vdf_w;
+            int16_t vh = g_rt.pending_vdf_h;
+            if (!g_rt.aspect.hw.vdf_rect_valid ||
+                g_rt.aspect.hw.vdf_rect.x != vx || g_rt.aspect.hw.vdf_rect.y != vy ||
+                g_rt.aspect.hw.vdf_rect.w != vw || g_rt.aspect.hw.vdf_rect.h != vh) {
+                zvp_aspect_update_vdf_rect(&g_rt.aspect, vx, vy, vw, vh);
+                aspect_need_sync = true;
+            }
+        }
+        if (g_rt.pending_panel_valid) {
+            uint8_t r0 = g_rt.pending_panel_raw[0];
+            uint8_t r1 = g_rt.pending_panel_raw[1];
+            bool p16 = (r1 == 2u);
+            if (!g_rt.aspect.hw.panel_aspect_valid ||
+                g_rt.aspect.hw.vdf_panel_raw[0] != r0 ||
+                g_rt.aspect.hw.vdf_panel_raw[1] != r1) {
+                zvp_aspect_update_panel_aspect(&g_rt.aspect, p16, r0, r1);
+                aspect_need_sync = true;
+            }
+        }
+    }
+
+    static uint64_t s_last_view_poll_ms = 0u;
+    if (g_rt.aspect.enabled &&
+        (s_last_view_poll_ms == 0u || (now - s_last_view_poll_ms) >= 80u)) {
+        s_last_view_poll_ms = now;
+        extern void zvp_aspect_poll_native_view_state(bool *out_changed);
+        bool view_changed = false;
+        zvp_aspect_poll_native_view_state(&view_changed);
+        if (view_changed) {
+            aspect_need_sync = true;
+        }
+    }
+
+    if (flip_pending) {
+        aspect_need_sync = true;
+    }
+
+    if (aspect_need_sync) {
+        zvp_aspect_recompute(&g_rt.aspect, zvp_input_is_ui_rotated_180(&g_rt.input));
+        static uint32_t s_asp_sync_logs = 0u;
+        if (s_asp_sync_logs < 32u) {
+            s_asp_sync_logs++;
+            uint32_t p_push = 0u, p_drain = 0u, p_dl = 0u, p_dh = 0u, p_df = 0u;
+            int p_lk = 0;
+            zvp_capture_probe_get_stats(&p_push, &p_drain, &p_dl, &p_dh, &p_df, &p_lk);
+            zvp_logf("aspect sync #%u: en=%d view=(%d,%d,%d,%d) frame=(%d,%d,%d,%d) menu=%d pb=%d probe=(%u/%u dl=%u dh=%u df=%u lk=%d)",
+                     (unsigned)s_asp_sync_logs, g_rt.aspect.enabled ? 1 : 0,
+                     (int)g_rt.aspect.layout.view_rect.x, (int)g_rt.aspect.layout.view_rect.y,
+                     (int)g_rt.aspect.layout.view_rect.w, (int)g_rt.aspect.layout.view_rect.h,
+                     (int)g_rt.aspect.layout.frame_rect.x, (int)g_rt.aspect.layout.frame_rect.y,
+                     (int)g_rt.aspect.layout.frame_rect.w, (int)g_rt.aspect.layout.frame_rect.h,
+                     g_rt.aspect.hw.camera_in_menu ? 1 : 0,
+                     g_rt.aspect.hw.camera_in_playback ? 1 : 0,
+                     (unsigned)p_push, (unsigned)p_drain,
+                     (unsigned)p_dl, (unsigned)p_dh, (unsigned)p_df, p_lk);
+        }
+        if (g_rt.aspect.enabled || g_rt.ui.built) {
+            zvp_ui_sync_overlay(&g_rt.ui);
+        }
+    }
+
     /* 3. 处理长按阈值定时器与后台业务轮询 */
     if (!g_rt.guard_cleared && g_rt.active_since_ms != 0u &&
         now >= g_rt.active_since_ms &&
@@ -545,6 +713,8 @@ void zvp_runtime_on_animate(void)
         zvp_logf("开机看门狗已解除: 插件已稳定运行 %llums",
                  (unsigned long long)(now - g_rt.active_since_ms));
     }
+    /* 诊断期暂停 12s 自动开启 OSAL 抓包刷屏，保留 /tmp/zve10plugin.log 关键轨迹 */
+    (void)now;
 
     uint32_t tick_act = zvp_input_tick(&g_rt.input, now);
     if (tick_act != ZVP_ACT_NONE) {
@@ -563,15 +733,43 @@ void zvp_runtime_on_animate(void)
         zvp_ui_refresh(&g_rt.ui);
     }
 
+    /* LUT 滚到即预览防抖延迟落盘 (600ms 无新切换时写入 zvc.cfg，避免连续拨轮卡顿) */
+    if (g_rt.lut.cfg_dirty && !g_rt.lut.fine_editing &&
+        g_rt.lut_cfg_dirty_ms != 0u && now >= g_rt.lut_cfg_dirty_ms &&
+        (now - g_rt.lut_cfg_dirty_ms) >= 600u) {
+        g_rt.lut_cfg_dirty_ms = 0u;
+        (void)zvp_lut_flush_pending_cfg(&g_rt.lut);
+    }
+
+    if (g_rt.craw.liro_installed &&
+        (g_rt.ui.active_page == ZVP_PAGE_2K_CRAW || g_rt.craw.mode != ZVP_CRAW_LIRO_BYPASS)) {
+        uint32_t prev_rdc = g_rt.craw.shm_snap.rdc_calls;
+        uint32_t prev_dfe = g_rt.craw.shm_snap.dfe_rdc_calls + g_rt.craw.shm_snap.dfe_main_calls;
+        uint32_t prev_aif = g_rt.craw.shm_snap.aif_calls;
+        uint32_t prev_wr  = g_rt.craw.shm_snap.write_seq;
+        if (zvp_craw_poll_telemetry(&g_rt.craw, now) == 0 && g_rt.ui.built &&
+            g_rt.ui.active_page == ZVP_PAGE_2K_CRAW &&
+            (g_rt.craw.shm_snap.rdc_calls != prev_rdc ||
+             (g_rt.craw.shm_snap.dfe_rdc_calls + g_rt.craw.shm_snap.dfe_main_calls) != prev_dfe ||
+             g_rt.craw.shm_snap.aif_calls != prev_aif ||
+             g_rt.craw.shm_snap.write_seq != prev_wr)) {
+            zvp_ui_refresh(&g_rt.ui);
+        }
+    }
+
     if (flip_pending && g_rt.ui.built) {
         zvp_ui_refresh(&g_rt.ui);
-        if ((g_rt.input.menu_visible || g_rt.input.mini_widget_visible) && g_rt.ui.scr) {
+        if ((g_rt.input.menu_visible || g_rt.input.mini_widget_visible ||
+             zvp_aspect_should_display(&g_rt.aspect, g_rt.input.menu_visible)) &&
+            g_rt.ui.scr) {
             lv_obj_invalidate(g_rt.ui.scr);
         }
     }
 
-    /* 4. 仅在 UI 主线程执行 LVGL 刷新与 Sprite 提交（含菜单或拍摄左上角悬浮窗） */
-    if ((g_rt.input.menu_visible || g_rt.input.mini_widget_visible) && g_rt.lvgl.initialized) {
+    /* 4. 仅在 UI 主线程执行 LVGL 刷新与 Sprite 提交（菜单 / 悬浮窗 / 纵横比遮罩） */
+    if ((g_rt.input.menu_visible || g_rt.input.mini_widget_visible ||
+         zvp_aspect_should_display(&g_rt.aspect, g_rt.input.menu_visible)) &&
+        g_rt.lvgl.initialized) {
         if (had_key_nav || drained_touch) {
             lv_tick_inc(15u);
         }
@@ -1290,4 +1488,158 @@ int _ZN3MWF5ObjIf17IssueCommandAsyncEPvPNS_6ObjMsgE(void *obj_if, void *msg)
         }
     }
     return fn ? fn(obj_if, msg) : -1;
+}
+
+/* ============================================================================
+ * 纵横比取景视图状态监测与 VdfCh 布局被动观察钩子（绝不篡改原厂参数）
+ * ========================================================================== */
+
+typedef int  (*fn_vdf_set_yuv_t)(void *self, const void *prm);
+typedef int  (*fn_vdf_get_yuv_t)(void *self, const void *req, void *comp);
+typedef int  (*fn_vdf_get_panel_aspect_t)(void *self, void *comp);
+typedef bool (*fn_view_bool_getter_t)(void);
+
+void zvp_aspect_poll_native_view_state(bool *out_changed)
+{
+    static int s_resolved = 0;
+    static fn_view_bool_getter_t fn_menu = NULL;
+    static fn_view_bool_getter_t fn_pb = NULL;
+    static fn_view_bool_getter_t fn_pb_open = NULL;
+    static fn_view_bool_getter_t fn_panel_16_9 = NULL;
+
+    if (!s_resolved) {
+        s_resolved = 1;
+        fn_menu = (fn_view_bool_getter_t)dlsym(RTLD_DEFAULT, "_ZN27CmnForUseMultipleViewStatus22getMenuExistenceStatusEv");
+        fn_pb = (fn_view_bool_getter_t)dlsym(RTLD_DEFAULT, "_ZN27CmnForUseMultipleViewStatus20getPbExistenceStatusEv");
+        fn_pb_open = (fn_view_bool_getter_t)dlsym(RTLD_DEFAULT, "_ZN18WrapperSettingUtil14isPlaybackOpenEv");
+        fn_panel_16_9 = (fn_view_bool_getter_t)dlsym(RTLD_DEFAULT, "_ZN21CmnViewFeatureManager17isPanelAspect16_9Ev");
+        zvp_logf("视图状态符号解析: menu=%p pb=%p pb_open=%p p16_9=%p",
+                 (void *)fn_menu, (void *)fn_pb, (void *)fn_pb_open, (void *)fn_panel_16_9);
+    }
+
+    bool in_menu = fn_menu ? fn_menu() : false;
+    bool in_pb = (fn_pb && fn_pb()) || (fn_pb_open && fn_pb_open());
+
+    bool changed = false;
+    if (g_rt.aspect.hw.camera_in_menu != in_menu ||
+        g_rt.aspect.hw.camera_in_playback != in_pb) {
+        zvp_aspect_update_camera_ui_state(&g_rt.aspect, in_menu, in_pb);
+        changed = true;
+    }
+
+    if (fn_panel_16_9) {
+        bool p16 = fn_panel_16_9();
+        if (!g_rt.aspect.hw.panel_aspect_valid ||
+            g_rt.aspect.hw.panel_is_16_9 != p16) {
+            zvp_aspect_update_panel_aspect(&g_rt.aspect, p16,
+                                           g_rt.aspect.hw.vdf_panel_raw[0],
+                                           g_rt.aspect.hw.vdf_panel_raw[1]);
+            changed = true;
+        }
+    }
+
+    if (out_changed) {
+        *out_changed = changed;
+    }
+}
+
+static void observe_vdf_yuv_rect(void *vdf_self, const void *prm_buf, const char *src_tag)
+{
+    if (!vdf_self || !prm_buf || should_bypass_all()) {
+        return;
+    }
+    uint16_t ch = *(const uint16_t *)((const uint8_t *)vdf_self + 0x24u);
+    const uint8_t *p = (const uint8_t *)prm_buf;
+    int16_t dst_x = *(const int16_t *)(p + 20u);
+    int16_t dst_y = *(const int16_t *)(p + 22u);
+    int16_t dst_w = *(const int16_t *)(p + 24u);
+    int16_t dst_h = *(const int16_t *)(p + 26u);
+
+    static uint32_t s_vdf_logs = 0u;
+    if (s_vdf_logs < 32u) {
+        s_vdf_logs++;
+        zvp_logf("VdfCh(%u) %s: dst=(%d,%d,%d,%d) route=%u",
+                 (unsigned)ch, src_tag ? src_tag : "?",
+                 (int)dst_x, (int)dst_y, (int)dst_w, (int)dst_h, (unsigned)p[8]);
+    }
+
+    /* 主 LCD LiveView 通道为 41 (0x29)；仅在收到合理屏幕矩形时更新观测缓存 */
+    if (ch == 41u &&
+        dst_w >= 160 && dst_h >= 120 &&
+        dst_x >= 0 && dst_y >= 0 &&
+        (int32_t)dst_x + (int32_t)dst_w <= ZVP_SCREEN_WIDTH &&
+        (int32_t)dst_y + (int32_t)dst_h <= ZVP_SCREEN_HEIGHT) {
+        g_rt.pending_vdf_x = dst_x;
+        g_rt.pending_vdf_y = dst_y;
+        g_rt.pending_vdf_w = dst_w;
+        g_rt.pending_vdf_h = dst_h;
+        g_rt.pending_vdf_valid = true;
+        __sync_synchronize();
+        g_rt.aspect_hw_dirty = true;
+    }
+}
+
+int _ZN17OBJAVBBCBASECLASS5VdfCh12setYUVLayoutERKN3VDF28VDF_PRM_INPUT_SET_YUV_LAYOUTE(void *self, const void *prm)
+{
+    static fn_vdf_set_yuv_t real_fn = NULL;
+    fn_vdf_set_yuv_t fn = __atomic_load_n(&real_fn, __ATOMIC_ACQUIRE);
+    if (!fn) {
+        fn = (fn_vdf_set_yuv_t)dlsym(RTLD_NEXT, "_ZN17OBJAVBBCBASECLASS5VdfCh12setYUVLayoutERKN3VDF28VDF_PRM_INPUT_SET_YUV_LAYOUTE");
+        if (fn) {
+            __atomic_store_n(&real_fn, fn, __ATOMIC_RELEASE);
+        }
+    }
+    int rc = fn ? fn(self, prm) : -1;
+    if (rc == 0) {
+        observe_vdf_yuv_rect(self, prm, "setYUV");
+    }
+    return rc;
+}
+
+int _ZN17OBJAVBBCBASECLASS5VdfCh12getYuvLayoutERKN3VDF28VDF_PRM_INPUT_GET_YUV_LAYOUTERNS1_33VDF_PRM_INPUT_GET_YUV_LAYOUT_COMPE(void *self, const void *req, void *comp)
+{
+    static fn_vdf_get_yuv_t real_fn = NULL;
+    fn_vdf_get_yuv_t fn = __atomic_load_n(&real_fn, __ATOMIC_ACQUIRE);
+    if (!fn) {
+        fn = (fn_vdf_get_yuv_t)dlsym(RTLD_NEXT, "_ZN17OBJAVBBCBASECLASS5VdfCh12getYuvLayoutERKN3VDF28VDF_PRM_INPUT_GET_YUV_LAYOUTERNS1_33VDF_PRM_INPUT_GET_YUV_LAYOUT_COMPE");
+        if (fn) {
+            __atomic_store_n(&real_fn, fn, __ATOMIC_RELEASE);
+        }
+    }
+    int rc = fn ? fn(self, req, comp) : -1;
+    if (rc == 0) {
+        observe_vdf_yuv_rect(self, comp, "getYUV");
+    }
+    return rc;
+}
+
+int _ZN17OBJAVBBCBASECLASS5VdfCh14getPanelAspectERN3VDF34VDF_PRM_DISP_GET_PANEL_ASPECT_COMPE(void *self, void *comp)
+{
+    static fn_vdf_get_panel_aspect_t real_fn = NULL;
+    fn_vdf_get_panel_aspect_t fn = __atomic_load_n(&real_fn, __ATOMIC_ACQUIRE);
+    if (!fn) {
+        fn = (fn_vdf_get_panel_aspect_t)dlsym(RTLD_NEXT, "_ZN17OBJAVBBCBASECLASS5VdfCh14getPanelAspectERN3VDF34VDF_PRM_DISP_GET_PANEL_ASPECT_COMPE");
+        if (fn) {
+            __atomic_store_n(&real_fn, fn, __ATOMIC_RELEASE);
+        }
+    }
+    int rc = fn ? fn(self, comp) : -1;
+    if (rc == 0 && self && comp && !should_bypass_all()) {
+        uint16_t ch = *(const uint16_t *)((const uint8_t *)self + 0x24u);
+        const uint8_t *c = (const uint8_t *)comp;
+        static uint32_t s_pa_logs = 0u;
+        if (s_pa_logs < 8u) {
+            s_pa_logs++;
+            zvp_logf("VdfCh(%u) getPanelAspect: raw=[%u, %u]",
+                     (unsigned)ch, (unsigned)c[8], (unsigned)c[9]);
+        }
+        if (ch == 41u) {
+            g_rt.pending_panel_raw[0] = c[8];
+            g_rt.pending_panel_raw[1] = c[9];
+            g_rt.pending_panel_valid = true;
+            __sync_synchronize();
+            g_rt.aspect_hw_dirty = true;
+        }
+    }
+    return rc;
 }

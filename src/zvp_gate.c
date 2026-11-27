@@ -20,7 +20,7 @@ static bool check_flag_file_on_drive(const zvp_gate_ops_t *ops, char drv, const 
 
 static bool has_flag_file_anywhere(const zvp_gate_ops_t *ops, uint32_t drives, const char *name)
 {
-    for (uint32_t d = 1u; d < 26u; d++) {
+    for (uint32_t d = 0u; d < 26u; d++) {
         if ((drives & (1u << d)) != 0u) {
             if (check_flag_file_on_drive(ops, (char)('A' + d), name)) {
                 return true;

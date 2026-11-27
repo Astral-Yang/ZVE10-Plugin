@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.16)
-project(zve10plugin LANGUAGES C CXX)
+project(zve10plugin LANGUAGES C CXX ASM)
 
 set(CMAKE_C_STANDARD 11)
 set(CMAKE_C_STANDARD_REQUIRED ON)
@@ -14,6 +14,10 @@ set(ZVP_LOGIC_SOURCES
     src/zvp_recovery.c
     src/zvp_input_hook.c
     src/zvp_sound.c
+    src/zvp_aspect.c
+    src/zvp_craw.c
+    src/zvp_lut.c
+    src/zvp_menu_touch.c
 )
 
 # 相机端完整运行时注入库 libzve10plugin.so（仅在完整构建时编译 LVGL）
@@ -55,12 +59,15 @@ if(NOT ZVP_BUILD_HOST_TESTS)
 
     add_library(zve10plugin SHARED
         ${ZVP_LOGIC_SOURCES}
+        src/zvp_mtf_trampoline.S
         src/zvp_font_zh24.c
+        src/zvp_font_zh20.c
         src/zvp_font_zh18.c
         src/zvp_native_bridge.c
         src/zvp_lvgl_port.c
         src/zvp_ui.c
         src/zvp_fopen_hook.c
+        src/zvp_capture_probe.c
         src/zvp_entry.c
     )
 
