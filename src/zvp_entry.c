@@ -18,6 +18,164 @@ __asm__(".symver dlsym, dlsym@GLIBC_2.4");
 
 static zvp_runtime_t g_rt;
 
+static uint64_t s_sound_resume_boot_ms = 0u;
+static uint64_t s_sound_resume_mono_ms = 0u;
+static uint64_t s_sound_resume_wall_ms = 0u;
+static uint64_t s_sound_resume_uptime_ms = 0u;
+static uint64_t s_sound_resume_retry_ms = 0u;
+static uint32_t s_sound_resume_retries = 0u;
+static uint64_t s_sound_clock_log_ms = 0u;
+static bool s_sound_resume_pending = false;
+static bool s_display_was_off = false;
+static bool s_display_resume_event = false;
+static uint64_t s_display_off_ms = 0u;
+static uint32_t s_disp_log_count = 0u;
+
+bool zvp_runtime_take_display_resume(void)
+{
+    return __atomic_exchange_n(&s_display_resume_event, false, __ATOMIC_ACQ_REL);
+}
+
+/* 读取 /proc/uptime 的秒数（内核的 boottime，含 STR 挂起时间）。
+ * 不依赖 CLOCK_BOOTTIME syscall；部分 Sony 内核只在这里暴露挂起时间。 */
+static uint64_t zvp_proc_uptime_ms(void)
+{
+    static uint64_t cached_ms = 0u;
+    static uint64_t cached_at = 0u;
+    uint64_t now = zvp_monotonic_ms();
+    if (cached_ms != 0u && now >= cached_at && now - cached_at < 500u) {
+        return cached_ms;
+    }
+
+    char buf[64];
+    int fd = open("/proc/uptime", O_RDONLY);
+    if (fd < 0) {
+        return cached_ms;
+    }
+    ssize_t n = read(fd, buf, sizeof(buf) - 1u);
+    close(fd);
+    if (n <= 0) {
+        return cached_ms;
+    }
+    buf[n] = '\0';
+
+    const char *p = buf;
+    uint64_t sec = 0u;
+    while (*p >= '0' && *p <= '9') {
+        sec = sec * 10u + (uint64_t)(*p - '0');
+        p++;
+    }
+    uint32_t frac = 0u;
+    uint32_t digits = 0u;
+    if (*p == '.') {
+        p++;
+        while (*p >= '0' && *p <= '9' && digits < 3u) {
+            frac = frac * 10u + (uint32_t)(*p - '0');
+            digits++;
+            p++;
+        }
+    }
+    if (digits == 1u) {
+        frac *= 100u;
+    } else if (digits == 2u) {
+        frac *= 10u;
+    }
+    cached_ms = sec * 1000u + (uint64_t)frac;
+    cached_at = now;
+    return cached_ms;
+}
+
+/* 在 UI ticker 中调用（非输入快路径）：检测 STR resume 并重建快门音槽位。 */
+static void zvp_poll_sound_resume(void)
+{
+    uint64_t boot = zvp_boottime_ms();
+    uint64_t mono = zvp_monotonic_ms();
+    uint64_t wall = zvp_realtime_ms();
+    uint64_t uptime = zvp_proc_uptime_ms();
+    uint64_t boot_gap = 0u;
+    uint64_t wall_gap = 0u;
+    uint64_t uptime_gap = 0u;
+    uint64_t mono_gap = (s_sound_resume_mono_ms != 0u && mono >= s_sound_resume_mono_ms)
+                            ? (mono - s_sound_resume_mono_ms) : 0u;
+    bool resumed = false;
+
+    if (s_sound_clock_log_ms == 0u || mono - s_sound_clock_log_ms >= 30000u) {
+        s_sound_clock_log_ms = mono;
+        zvp_logf("sound clock: boot=%llu mono=%llu wall=%llu uptime=%llu",
+                 (unsigned long long)boot,
+                 (unsigned long long)mono,
+                 (unsigned long long)wall,
+                 (unsigned long long)uptime);
+    }
+
+    if (s_sound_resume_boot_ms != 0u && boot > s_sound_resume_boot_ms) {
+        boot_gap = boot - s_sound_resume_boot_ms;
+        /* 正常 tick 两者同步增长；STR 期间 BOOTTIME 增长而 MONOTONIC 不增长。 */
+        if (boot_gap > mono_gap + 2000u) {
+            resumed = true;
+        }
+    }
+    if (!resumed && s_sound_resume_wall_ms != 0u && wall > s_sound_resume_wall_ms) {
+        wall_gap = wall - s_sound_resume_wall_ms;
+        /* 少数内核没有 CLOCK_BOOTTIME 时，用墙上时钟做次选检测。 */
+        if (wall_gap > mono_gap + 1500u) {
+            resumed = true;
+        }
+    }
+    if (!resumed && s_sound_resume_uptime_ms != 0u &&
+        uptime > s_sound_resume_uptime_ms) {
+        uptime_gap = uptime - s_sound_resume_uptime_ms;
+        /* /proc/uptime 在 Sony 内核上通常仍包含 STR 挂起时间。 */
+        if (uptime_gap > mono_gap + 1500u) {
+            resumed = true;
+        }
+    }
+
+    s_sound_resume_boot_ms = boot;
+    s_sound_resume_mono_ms = mono;
+    s_sound_resume_wall_ms = wall;
+    s_sound_resume_uptime_ms = uptime;
+
+    if (resumed) {
+        s_sound_resume_pending = true;
+        s_sound_resume_retries = 0u;
+        s_sound_resume_retry_ms = mono;
+        zvp_logf("sound resume: boot_gap=%llu wall_gap=%llu uptime_gap=%llu mono_gap=%llu ms",
+                 (unsigned long long)boot_gap,
+                 (unsigned long long)wall_gap,
+                 (unsigned long long)uptime_gap,
+                 (unsigned long long)mono_gap);
+        if (zvp_sound_rebind_cached(&g_rt.sound)) {
+            s_sound_resume_pending = false;
+            zvp_logf("sound resume: re-bound cached slot=0x%02x bytes=%u",
+                     (unsigned)g_rt.sound.active_slot,
+                     (unsigned)g_rt.sound.last_f0_bytes);
+        } else {
+            zvp_sound_invalidate_cache(&g_rt.sound);
+        }
+    }
+
+    if (!s_sound_resume_pending) {
+        return;
+    }
+    if ((int64_t)(mono - s_sound_resume_retry_ms) < 0) {
+        return;
+    }
+    if (zvp_sound_rebind_cached(&g_rt.sound)) {
+        s_sound_resume_pending = false;
+        s_sound_resume_retries = 0u;
+        zvp_logf("sound resume: re-bound cached slot=0x%02x bytes=%u",
+                 (unsigned)g_rt.sound.active_slot,
+                 (unsigned)g_rt.sound.last_f0_bytes);
+    } else if (++s_sound_resume_retries >= 6u) {
+        s_sound_resume_pending = false;
+        s_sound_resume_retries = 0u;
+        zvp_logf("sound resume: cached f0 unavailable; wait for next selection");
+    } else {
+        s_sound_resume_retry_ms = mono + 500u;
+    }
+}
+
 static long zvp_gettid(void)
 {
 #if defined(__linux__) && defined(SYS_gettid)
@@ -554,6 +712,8 @@ void zvp_runtime_on_animate(void)
         return;
     }
 
+    zvp_poll_sound_resume();
+
     uint64_t now = zvp_monotonic_ms();
 
     /* 排空静态拍照管线只读测绘探针日志 */
@@ -884,6 +1044,29 @@ void _ZN20LayoutableWidgetBase12setDispStateEb(void *self, bool disp)
     }
     if (real_fn) {
         real_fn(self, disp);
+    }
+    static int8_t s_last_disp = -1;
+    if ((disp ? 1 : 0) != s_last_disp && s_disp_log_count < 20u) {
+        s_last_disp = disp ? 1 : 0;
+        s_disp_log_count++;
+        zvp_logf("disp_state self=%p disp=%d", self, disp ? 1 : 0);
+    }
+    if (!disp) {
+        if (!s_display_was_off) {
+            s_display_was_off = true;
+            s_display_off_ms = zvp_monotonic_ms();
+        }
+    } else if (s_display_was_off) {
+        uint64_t now = zvp_monotonic_ms();
+        /* 普通 UI 的 widget 隐藏/显示常在同一帧内成对出现；只有持续
+         * 至少 300ms 的 display off→on 才视为一次真正的屏幕恢复。 */
+        if (s_display_off_ms != 0u && now >= s_display_off_ms &&
+            now - s_display_off_ms >= 300u) {
+            __atomic_store_n(&s_display_resume_event, true, __ATOMIC_RELEASE);
+            zvp_logf("disp resume: off_ms=%llu",
+                     (unsigned long long)(now - s_display_off_ms));
+        }
+        s_display_was_off = false;
     }
     ui_thread_bootstrap_if_needed();
 }

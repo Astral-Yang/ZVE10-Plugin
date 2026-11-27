@@ -66,6 +66,7 @@ typedef struct {
     int32_t last_error;
     uint32_t play_count;
     uint64_t last_play_ms;
+    uint64_t last_wall_play_ms;
 
     char override_dir[ZVP_SOUND_PATH_LEN];
     char active_bin_path[ZVP_SOUND_PATH_LEN];
@@ -91,6 +92,10 @@ bool zvp_sound_select_by_name(zvp_sound_mgr_t *mgr, const char *name);
 void zvp_sound_prev(zvp_sound_mgr_t *mgr);
 void zvp_sound_next(zvp_sound_mgr_t *mgr);
 bool zvp_sound_prepare_current(zvp_sound_mgr_t *mgr);
+/* STR resume 后调用：丢弃旧 ADF 槽位缓存并让下一次 prepare 重新注册。 */
+void zvp_sound_invalidate_cache(zvp_sound_mgr_t *mgr);
+/* STR resume 后优先复用 /tmp 里最后一次生成的 F0，仅重新绑定 ADF 槽位，不读 SD。 */
+bool zvp_sound_rebind_cached(zvp_sound_mgr_t *mgr);
 /* UI/预览线程调用：如尚未就绪可先同步准备再触发播放 */
 bool zvp_sound_play(zvp_sound_mgr_t *mgr, uint64_t now_ms);
 /* 输入快路径调用：仅在已就绪时零阻塞触发播放，绝不执行磁盘或重采样 I/O */
