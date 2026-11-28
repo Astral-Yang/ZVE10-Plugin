@@ -464,6 +464,139 @@ static void on_aspect_par_clicked(lv_event_t *e)
     trigger_aspect_par_cycle(rt, 1, "touch");
 }
 
+/* ---------- 屏幕校色页事件回调 ---------- */
+static void trigger_cal_toggle_enable(zvp_runtime_t *rt, const char *src)
+{
+    if (!rt) return;
+    bool next = !rt->color_cal.enabled;
+    int rc = zvp_color_cal_set_enabled(&rt->color_cal, next, true, zvp_monotonic_ms());
+    zvp_logf("[cal] toggle(%s) -> en=%d rc=%d msg=%s",
+             src ? src : "?", next ? 1 : 0, rc, rt->color_cal.last_msg);
+    zvp_ui_refresh(&rt->ui);
+}
+
+static void trigger_cal_toggle_compare(zvp_runtime_t *rt, const char *src)
+{
+    if (!rt) return;
+    int rc = zvp_color_cal_toggle_compare(&rt->color_cal, zvp_monotonic_ms());
+    zvp_logf("[cal] compare(%s) -> en=%d cmp=%d rc=%d",
+             src ? src : "?",
+             rt->color_cal.enabled ? 1 : 0,
+             rt->color_cal.compare_original ? 1 : 0,
+             rc);
+    zvp_ui_refresh(&rt->ui);
+}
+
+static void trigger_cal_cycle_preset(zvp_runtime_t *rt, int step, const char *src)
+{
+    if (!rt) return;
+    int cnt = (int)ZVP_CAL_PRESET_COUNT;
+    int cur = (int)rt->color_cal.preset_idx;
+    int next = ((cur + step) % cnt + cnt) % cnt;
+    int rc = zvp_color_cal_select_preset(&rt->color_cal, (uint8_t)next, true, zvp_monotonic_ms());
+    zvp_logf("[cal] preset(%s) -> idx=%d (%s) rc=%d",
+             src ? src : "?", next, zvp_cal_get_preset((uint8_t)next)->name, rc);
+    zvp_ui_refresh(&rt->ui);
+}
+
+static void trigger_cal_step_param(zvp_runtime_t *rt, int delta, const char *src)
+{
+    if (!rt) return;
+    if ((uint32_t)rt->ui.cal_sel_param >= ZVP_CAL_PARAM_COUNT) {
+        rt->ui.cal_sel_param = ZVP_CAL_PARAM_TEMP;
+    }
+    int rc = zvp_color_cal_step_param(&rt->color_cal, rt->ui.cal_sel_param, delta, zvp_monotonic_ms());
+    zvp_logf("[cal] step(%s) p=%u delta=%d val=%d rc=%d",
+             src ? src : "?",
+             (unsigned)rt->ui.cal_sel_param, delta,
+             (int)rt->color_cal.params.vals[rt->ui.cal_sel_param], rc);
+    zvp_ui_refresh(&rt->ui);
+}
+
+static void trigger_cal_reset(zvp_runtime_t *rt, const char *src)
+{
+    if (!rt) return;
+    int rc = zvp_color_cal_reset_params(&rt->color_cal, true, zvp_monotonic_ms());
+    zvp_logf("[cal] reset(%s) rc=%d", src ? src : "?", rc);
+    zvp_ui_refresh(&rt->ui);
+}
+
+static void on_cal_enable_clicked(lv_event_t *e)
+{
+    (void)e;
+    zvp_runtime_t *rt = zvp_runtime_get();
+    if (!rt) return;
+    set_focus_obj(&rt->ui, rt->ui.btn_cal_enable);
+    trigger_cal_toggle_enable(rt, "touch");
+}
+
+static void on_cal_compare_clicked(lv_event_t *e)
+{
+    (void)e;
+    zvp_runtime_t *rt = zvp_runtime_get();
+    if (!rt) return;
+    set_focus_obj(&rt->ui, rt->ui.btn_cal_compare);
+    trigger_cal_toggle_compare(rt, "touch");
+}
+
+static void on_cal_preset_clicked(lv_event_t *e)
+{
+    (void)e;
+    zvp_runtime_t *rt = zvp_runtime_get();
+    if (!rt) return;
+    set_focus_obj(&rt->ui, rt->ui.btn_cal_preset);
+    trigger_cal_cycle_preset(rt, 1, "touch");
+}
+
+static void on_cal_reset_clicked(lv_event_t *e)
+{
+    (void)e;
+    zvp_runtime_t *rt = zvp_runtime_get();
+    if (!rt) return;
+    set_focus_obj(&rt->ui, rt->ui.btn_cal_reset);
+    trigger_cal_reset(rt, "touch");
+}
+
+static void on_cal_minus_clicked(lv_event_t *e)
+{
+    (void)e;
+    zvp_runtime_t *rt = zvp_runtime_get();
+    if (!rt) return;
+    trigger_cal_step_param(rt, -1, "touch_minus");
+}
+
+static void on_cal_plus_clicked(lv_event_t *e)
+{
+    (void)e;
+    zvp_runtime_t *rt = zvp_runtime_get();
+    if (!rt) return;
+    trigger_cal_step_param(rt, 1, "touch_plus");
+}
+
+static void on_cal_param_clicked(lv_event_t *e)
+{
+    zvp_runtime_t *rt = zvp_runtime_get();
+    if (!rt) return;
+    uint32_t idx = (uint32_t)(uintptr_t)lv_event_get_user_data(e);
+    if (idx >= ZVP_CAL_PARAM_COUNT) return;
+    rt->ui.cal_sel_param = (zvp_cal_param_t)idx;
+    if (rt->ui.cal_param_btns[idx]) {
+        set_focus_obj(&rt->ui, rt->ui.cal_param_btns[idx]);
+    }
+    zvp_ui_refresh(&rt->ui);
+}
+
+static void on_cal_fine_reset_clicked(lv_event_t *e)
+{
+    (void)e;
+    zvp_runtime_t *rt = zvp_runtime_get();
+    if (!rt) return;
+    if (rt->ui.btn_cal_fine_reset) {
+        set_focus_obj(&rt->ui, rt->ui.btn_cal_fine_reset);
+    }
+    trigger_cal_reset(rt, "touch_fine_reset");
+}
+
 static uint8_t lut_slot_category(const zvp_lut_ctx_t *lut, uint32_t slot)
 {
     if (!lut || slot == 0u || slot >= lut->num_slots) {
@@ -1473,7 +1606,7 @@ static void build_lut_page(zvp_ui_t *ui, lv_obj_t *page)
     lv_obj_remove_style_all(ui->lut_list);
     lv_obj_set_size(ui->lut_list, 98, 408);
     lv_obj_set_flex_flow(ui->lut_list, LV_FLEX_FLOW_COLUMN);
-    lv_obj_set_style_pad_row(ui->lut_list, 3, 0);
+    lv_obj_set_style_pad_row(ui->lut_list, 5, 0);
     lv_obj_set_style_bg_opa(ui->lut_list, LV_OPA_TRANSP, 0);
     lv_obj_add_flag(ui->lut_list, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_set_scroll_dir(ui->lut_list, LV_DIR_VER);
@@ -1487,10 +1620,10 @@ static void build_lut_page(zvp_ui_t *ui, lv_obj_t *page)
 
     for (uint32_t i = 0u; i < ZVP_LUT_NUM_SLOTS; i++) {
         lv_obj_t *row = lv_button_create(ui->lut_list);
-        lv_obj_set_size(row, 94, 30);
+        lv_obj_set_size(row, 94, 46);
         style_mono_btn(row);
         lv_obj_set_style_pad_hor(row, 3, 0);
-        lv_obj_set_style_pad_ver(row, 1, 0);
+        lv_obj_set_style_pad_ver(row, 4, 0);
         lv_obj_set_flex_flow(row, LV_FLEX_FLOW_ROW);
         lv_obj_set_flex_align(row, LV_FLEX_ALIGN_SPACE_BETWEEN, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
         lv_obj_add_event_cb(row, on_lut_row_clicked, LV_EVENT_CLICKED, (void *)(uintptr_t)i);
@@ -1617,6 +1750,160 @@ static void build_lut_fine_layer(zvp_ui_t *ui, lv_obj_t *parent)
     lv_obj_add_flag(ui->lut_fine_layer, LV_OBJ_FLAG_HIDDEN);
 }
 
+static lv_obj_t *make_cal_side_btn(lv_obj_t *parent, int32_t h, const char *title,
+                                   const char *init_sub, lv_obj_t **out_sub)
+{
+    lv_obj_t *btn = lv_button_create(parent);
+    lv_obj_set_size(btn, 122, h);
+    style_mono_btn(btn);
+    lv_obj_set_style_pad_hor(btn, 4, 0);
+    lv_obj_set_style_pad_ver(btn, 4, 0);
+    lv_obj_set_flex_flow(btn, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_flex_align(btn, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_style_pad_row(btn, 2, 0);
+
+    make_label(btn, title, &zvp_font_zh20, ZVP_COLOR_WHITE);
+    if (out_sub) {
+        *out_sub = make_label(btn, init_sub, &zvp_font_zh18, ZVP_COLOR_TEXT_SUB);
+        lv_label_set_long_mode(*out_sub, LV_LABEL_LONG_CLIP);
+    }
+    return btn;
+}
+
+static void build_color_cal_page(zvp_ui_t *ui, lv_obj_t *page)
+{
+    lv_obj_set_flex_flow(page, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_style_pad_row(page, 6, 0);
+
+    /* 1. 总开关按钮卡 (122x74) */
+    ui->btn_cal_enable = create_click_card(page, 122, 74);
+    lv_obj_set_style_pad_hor(ui->btn_cal_enable, 6, 0);
+    lv_obj_set_style_pad_ver(ui->btn_cal_enable, 5, 0);
+    lv_obj_set_flex_flow(ui->btn_cal_enable, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_flex_align(ui->btn_cal_enable, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_style_pad_row(ui->btn_cal_enable, 4, 0);
+    lv_obj_add_event_cb(ui->btn_cal_enable, on_cal_enable_clicked, LV_EVENT_CLICKED, NULL);
+    make_label(ui->btn_cal_enable, "屏幕校色", &zvp_font_zh20, ZVP_COLOR_WHITE);
+    ui->badge_cal_enable = make_state_badge(ui->btn_cal_enable, 104, 30, "已关闭", &ui->lbl_cal_badge);
+    lv_obj_set_style_text_font(ui->lbl_cal_badge, &zvp_font_zh18, 0);
+
+    /* 2. 一键对比原色按钮 (122x66) */
+    ui->btn_cal_compare = make_cal_side_btn(page, 66, "对比原色", "切换基准", &ui->lbl_cal_compare);
+    lv_obj_add_event_cb(ui->btn_cal_compare, on_cal_compare_clicked, LV_EVENT_CLICKED, NULL);
+
+    /* 3. 校色预设循环按钮 (122x66) */
+    ui->btn_cal_preset = make_cal_side_btn(page, 66, "校色预设", "自定义", &ui->lbl_cal_preset);
+    lv_obj_add_event_cb(ui->btn_cal_preset, on_cal_preset_clicked, LV_EVENT_CLICKED, NULL);
+
+    /* 4. 全部参数归零 (122x52) */
+    ui->btn_cal_reset = lv_button_create(page);
+    lv_obj_set_size(ui->btn_cal_reset, 122, 52);
+    style_mono_btn(ui->btn_cal_reset);
+    lv_obj_add_event_cb(ui->btn_cal_reset, on_cal_reset_clicked, LV_EVENT_CLICKED, NULL);
+    lv_obj_t *lbl_z = make_label(ui->btn_cal_reset, "全部归零", &zvp_font_zh20, ZVP_COLOR_WHITE);
+    lv_obj_center(lbl_z);
+
+    /* 5. 状态摘要卡 (122x170，只读透传运行信息，无遮挡中央取景区) */
+    lv_obj_t *st_card = create_card(page, 122, 166);
+    lv_obj_set_style_pad_hor(st_card, 6, 0);
+    lv_obj_set_style_pad_ver(st_card, 6, 0);
+    lv_obj_set_flex_flow(st_card, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_style_pad_row(st_card, 4, 0);
+    make_label(st_card, "11bit 仅屏显", &zvp_font_zh18, ZVP_COLOR_WHITE);
+    ui->lbl_cal_status = make_label(st_card, "纯RAM无损", &zvp_font_zh18, ZVP_COLOR_TEXT_SUB);
+    lv_obj_set_width(ui->lbl_cal_status, 108);
+    lv_label_set_long_mode(ui->lbl_cal_status, LV_LABEL_LONG_WRAP);
+}
+
+static void build_cal_top_layer(zvp_ui_t *ui, lv_obj_t *parent)
+{
+    /* 右上角极窄步进胶囊 (252, 8, 380x40)，中间留出超大透明实景取景窗 */
+    ui->cal_top_layer = lv_obj_create(parent);
+    lv_obj_set_pos(ui->cal_top_layer, 252, 8);
+    lv_obj_set_size(ui->cal_top_layer, 380, 40);
+    style_glass_panel(ui->cal_top_layer, 8);
+    lv_obj_set_style_pad_hor(ui->cal_top_layer, 8, 0);
+    lv_obj_set_style_pad_ver(ui->cal_top_layer, 4, 0);
+    lv_obj_set_flex_flow(ui->cal_top_layer, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(ui->cal_top_layer, LV_FLEX_ALIGN_SPACE_BETWEEN, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_style_pad_column(ui->cal_top_layer, 6, 0);
+    lv_obj_clear_flag(ui->cal_top_layer, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_clear_flag(ui->cal_top_layer, LV_OBJ_FLAG_SCROLLABLE);
+
+    ui->lbl_cal_top_param = make_label(ui->cal_top_layer, "色温: 0", &zvp_font_zh18, ZVP_COLOR_WHITE);
+    lv_obj_set_width(ui->lbl_cal_top_param, 254);
+    lv_label_set_long_mode(ui->lbl_cal_top_param, LV_LABEL_LONG_CLIP);
+
+    ui->btn_cal_minus = lv_button_create(ui->cal_top_layer);
+    lv_obj_set_size(ui->btn_cal_minus, 46, 30);
+    style_mono_btn(ui->btn_cal_minus);
+    lv_obj_set_style_radius(ui->btn_cal_minus, 6, 0);
+    lv_obj_add_event_cb(ui->btn_cal_minus, on_cal_minus_clicked, LV_EVENT_CLICKED, NULL);
+    lv_obj_t *lm = make_label(ui->btn_cal_minus, "-", &zvp_font_zh24, ZVP_COLOR_WHITE);
+    lv_obj_center(lm);
+
+    ui->btn_cal_plus = lv_button_create(ui->cal_top_layer);
+    lv_obj_set_size(ui->btn_cal_plus, 46, 30);
+    style_mono_btn(ui->btn_cal_plus);
+    lv_obj_set_style_radius(ui->btn_cal_plus, 6, 0);
+    lv_obj_add_event_cb(ui->btn_cal_plus, on_cal_plus_clicked, LV_EVENT_CLICKED, NULL);
+    lv_obj_t *lp = make_label(ui->btn_cal_plus, "+", &zvp_font_zh24, ZVP_COLOR_WHITE);
+    lv_obj_center(lp);
+
+    lv_obj_add_flag(ui->cal_top_layer, LV_OBJ_FLAG_HIDDEN);
+}
+
+static void build_cal_fine_layer(zvp_ui_t *ui, lv_obj_t *parent)
+{
+    /* 右下 1x9 独立全透明参数磁贴条，贴于原厂 52px 黑条上方 (252, 378, 380x44) */
+    ui->cal_fine_layer = lv_obj_create(parent);
+    lv_obj_remove_style_all(ui->cal_fine_layer);
+    lv_obj_set_pos(ui->cal_fine_layer, 252, 378);
+    lv_obj_set_size(ui->cal_fine_layer, 380, 44);
+    lv_obj_set_style_bg_opa(ui->cal_fine_layer, LV_OPA_TRANSP, 0);
+    lv_obj_set_flex_flow(ui->cal_fine_layer, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(ui->cal_fine_layer, LV_FLEX_ALIGN_SPACE_BETWEEN, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_style_pad_column(ui->cal_fine_layer, 2, 0);
+    lv_obj_clear_flag(ui->cal_fine_layer, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_clear_flag(ui->cal_fine_layer, LV_OBJ_FLAG_SCROLLABLE);
+
+    static const char *const k_cal_short[ZVP_CAL_PARAM_COUNT] = {
+        "色温", "色调", "饱和", "对比", "伽马", "红", "绿", "蓝"
+    };
+    for (uint32_t i = 0u; i < ZVP_CAL_PARAM_COUNT; i++) {
+        lv_obj_t *tile = lv_button_create(ui->cal_fine_layer);
+        lv_obj_set_size(tile, 40, 44);
+        style_fine_tile(tile);
+        lv_obj_set_style_pad_hor(tile, 0, 0);
+        lv_obj_set_style_pad_ver(tile, 2, 0);
+        lv_obj_set_flex_flow(tile, LV_FLEX_FLOW_COLUMN);
+        lv_obj_set_flex_align(tile, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+        lv_obj_set_style_pad_row(tile, -2, 0);
+        lv_obj_add_event_cb(tile, on_cal_param_clicked, LV_EVENT_CLICKED, (void *)(uintptr_t)i);
+
+        lv_obj_t *lbl_t = make_label(tile, k_cal_short[i], &zvp_font_zh18, ZVP_COLOR_WHITE);
+        lv_label_set_long_mode(lbl_t, LV_LABEL_LONG_CLIP);
+        ui->cal_param_vals[i] = make_label(tile, "0", &zvp_font_zh18, ZVP_COLOR_WHITE);
+        lv_label_set_long_mode(ui->cal_param_vals[i], LV_LABEL_LONG_CLIP);
+        ui->cal_param_btns[i] = tile;
+    }
+
+    ui->btn_cal_fine_reset = lv_button_create(ui->cal_fine_layer);
+    lv_obj_set_size(ui->btn_cal_fine_reset, 42, 44);
+    style_fine_tile(ui->btn_cal_fine_reset);
+    lv_obj_set_style_pad_hor(ui->btn_cal_fine_reset, 0, 0);
+    lv_obj_set_style_pad_ver(ui->btn_cal_fine_reset, 2, 0);
+    lv_obj_set_flex_flow(ui->btn_cal_fine_reset, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_flex_align(ui->btn_cal_fine_reset, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_style_pad_row(ui->btn_cal_fine_reset, -2, 0);
+    lv_obj_add_event_cb(ui->btn_cal_fine_reset, on_cal_fine_reset_clicked, LV_EVENT_CLICKED, NULL);
+    make_label(ui->btn_cal_fine_reset, "\xee\x80\x87", &zvp_font_lut_icons, ZVP_COLOR_WHITE);
+    lv_obj_t *lbl_cr = make_label(ui->btn_cal_fine_reset, "重置", &zvp_font_zh18, ZVP_COLOR_WHITE);
+    lv_label_set_long_mode(lbl_cr, LV_LABEL_LONG_CLIP);
+
+    lv_obj_add_flag(ui->cal_fine_layer, LV_OBJ_FLAG_HIDDEN);
+}
+
 void zvp_ui_build(zvp_ui_t *ui)
 {
     zvp_runtime_t *rt = zvp_runtime_get();
@@ -1712,6 +1999,8 @@ void zvp_ui_build(zvp_ui_t *ui)
         lv_obj_set_pos(p, 0, 0);
         if (i == ZVP_PAGE_LUT) {
             lv_obj_set_size(p, 98, 408);
+        } else if (i == ZVP_PAGE_COLOR_CAL) {
+            lv_obj_set_size(p, 124, 452);
         } else {
             lv_obj_set_size(p, 502, 444);
             lv_obj_set_style_pad_left(p, 36, 0);
@@ -1721,16 +2010,19 @@ void zvp_ui_build(zvp_ui_t *ui)
         ui->pages[i] = p;
     }
 
-    /* 共享 / 校色 / 外录 / 超采 暂无功能，二级菜单保持留空 */
+    /* 共享 / 外录 / 超采 暂无功能，二级菜单保持留空 */
     build_lut_page(ui, ui->pages[ZVP_PAGE_LUT]);
     build_wifi5g_page(ui, ui->pages[ZVP_PAGE_WIFI5G]);
     build_custom_shutter_page(ui, ui->pages[ZVP_PAGE_CUSTOM_SHUTTER]);
+    build_color_cal_page(ui, ui->pages[ZVP_PAGE_COLOR_CAL]);
     build_aspect_page(ui, ui->pages[ZVP_PAGE_ASPECT_RATIO]);
     build_craw_page(ui, ui->pages[ZVP_PAGE_2K_CRAW]);
     build_settings_page(ui, ui->pages[ZVP_PAGE_SETTINGS]);
     build_mini_widget(ui, ui->scr);
     build_lut_top_layer(ui, ui->scr);
     build_lut_fine_layer(ui, ui->scr);
+    build_cal_top_layer(ui, ui->scr);
+    build_cal_fine_layer(ui, ui->scr);
 
     ui->built = true;
     zvp_ui_switch_page(ui, ZVP_PAGE_LUT);
@@ -1756,6 +2048,10 @@ void zvp_ui_switch_page(zvp_ui_t *ui, zvp_ui_page_t page)
                 }
                 lut_rebuild_visible_rows(ui, &rt->lut);
             }
+        } else if (page == ZVP_PAGE_COLOR_CAL) {
+            lv_obj_set_pos(ui->right_panel, 110, 8);
+            lv_obj_set_size(ui->right_panel, 136, 464);
+            lv_obj_set_style_pad_all(ui->right_panel, 6, 0);
         } else {
             lv_obj_set_pos(ui->right_panel, 110, 8);
             lv_obj_set_size(ui->right_panel, 522, 464);
@@ -1890,6 +2186,8 @@ bool zvp_ui_handle_nav_key(zvp_ui_t *ui, uint32_t act_mask)
                     first = ui->btn_wifi_card;
                 } else if (i == ZVP_PAGE_CUSTOM_SHUTTER) {
                     first = ui->btn_shutter_enable;
+                } else if (i == ZVP_PAGE_COLOR_CAL) {
+                    first = ui->btn_cal_enable;
                 } else if (i == ZVP_PAGE_ASPECT_RATIO) {
                     first = ui->btn_aspect_enable;
                 } else if (i == ZVP_PAGE_2K_CRAW) {
@@ -2349,6 +2647,91 @@ bool zvp_ui_handle_nav_key(zvp_ui_t *ui, uint32_t act_mask)
         return true;
     }
 
+    /* 4.5 焦点位于屏幕校色页（左副栏 4 按钮 <-> 右下 1x9 参数微调磁贴条） */
+    if (ui->active_page == ZVP_PAGE_COLOR_CAL) {
+        lv_obj_t *side_btns[4] = {
+            ui->btn_cal_enable, ui->btn_cal_compare, ui->btn_cal_preset, ui->btn_cal_reset
+        };
+        for (int s = 0; s < 4; s++) {
+            if (cur == side_btns[s]) {
+                if (act_mask & ZVP_ACT_NAV_LEFT) {
+                    set_focus_obj(ui, ui->nav_btns[ZVP_PAGE_COLOR_CAL]);
+                } else if (act_mask & ZVP_ACT_NAV_RIGHT) {
+                    uint32_t p = ((uint32_t)ui->cal_sel_param < ZVP_CAL_PARAM_COUNT)
+                                     ? (uint32_t)ui->cal_sel_param
+                                     : 0u;
+                    ui->cal_sel_param = (zvp_cal_param_t)p;
+                    if (ui->cal_param_btns[p]) {
+                        set_focus_obj(ui, ui->cal_param_btns[p]);
+                    }
+                    zvp_ui_refresh(ui);
+                } else if (act_mask & (ZVP_ACT_NAV_UP | ZVP_ACT_DIAL_PREV)) {
+                    set_focus_obj(ui, side_btns[(s + 3) % 4]);
+                } else if (act_mask & (ZVP_ACT_NAV_DOWN | ZVP_ACT_DIAL_NEXT)) {
+                    set_focus_obj(ui, side_btns[(s + 1) % 4]);
+                } else if (act_mask & ZVP_ACT_NAV_ENTER) {
+                    if (s == 0) trigger_cal_toggle_enable(rt, "key");
+                    else if (s == 1) trigger_cal_toggle_compare(rt, "key");
+                    else if (s == 2) trigger_cal_cycle_preset(rt, 1, "key");
+                    else trigger_cal_reset(rt, "key");
+                }
+                return true;
+            }
+        }
+
+        lv_obj_t *fine_row[9] = {
+            ui->cal_param_btns[0], ui->cal_param_btns[1], ui->cal_param_btns[2],
+            ui->cal_param_btns[3], ui->cal_param_btns[4], ui->cal_param_btns[5],
+            ui->cal_param_btns[6], ui->cal_param_btns[7], ui->btn_cal_fine_reset
+        };
+        for (int f = 0; f < 9; f++) {
+            if (cur == fine_row[f]) {
+                if (act_mask & ZVP_ACT_NAV_LEFT) {
+                    if (f == 0) {
+                        set_focus_obj(ui, ui->btn_cal_enable);
+                    } else {
+                        int prev = f - 1;
+                        if (prev < (int)ZVP_CAL_PARAM_COUNT) {
+                            ui->cal_sel_param = (zvp_cal_param_t)prev;
+                        }
+                        set_focus_obj(ui, fine_row[prev]);
+                        zvp_ui_refresh(ui);
+                    }
+                } else if (act_mask & ZVP_ACT_NAV_RIGHT) {
+                    if (f < 8) {
+                        int next = f + 1;
+                        if (next < (int)ZVP_CAL_PARAM_COUNT) {
+                            ui->cal_sel_param = (zvp_cal_param_t)next;
+                        }
+                        set_focus_obj(ui, fine_row[next]);
+                        zvp_ui_refresh(ui);
+                    }
+                } else if (act_mask & (ZVP_ACT_NAV_UP | ZVP_ACT_DIAL_NEXT)) {
+                    if (f < (int)ZVP_CAL_PARAM_COUNT) {
+                        ui->cal_sel_param = (zvp_cal_param_t)f;
+                        trigger_cal_step_param(rt, 1, "key_inc");
+                    }
+                } else if (act_mask & (ZVP_ACT_NAV_DOWN | ZVP_ACT_DIAL_PREV)) {
+                    if (f < (int)ZVP_CAL_PARAM_COUNT) {
+                        ui->cal_sel_param = (zvp_cal_param_t)f;
+                        trigger_cal_step_param(rt, -1, "key_dec");
+                    }
+                } else if (act_mask & ZVP_ACT_NAV_ENTER) {
+                    if (f == 8) {
+                        trigger_cal_reset(rt, "key_fine_reset");
+                    } else {
+                        /* 调参过程中按 OK 键即刻一键对比原色，再按恢复，提升盲操校色效率 */
+                        trigger_cal_toggle_compare(rt, "key_fine_cmp");
+                    }
+                }
+                return true;
+            }
+        }
+
+        set_focus_obj(ui, ui->btn_cal_enable);
+        return true;
+    }
+
     /* 5. 焦点位于右侧 Page 9 (2K cRAW 纯内存录制) */
     if (ui->active_page == ZVP_PAGE_2K_CRAW) {
         if (cur == ui->btn_craw_mode) {
@@ -2734,6 +3117,70 @@ void zvp_ui_refresh(zvp_ui_t *ui)
         }
     }
 
+    /* 屏幕校色页实时刷新 */
+    if (ui->btn_cal_enable) {
+        bool cal_on = rt->color_cal.enabled;
+        bool cal_cmp = cal_on && rt->color_cal.compare_original;
+        set_badge_checked(ui->badge_cal_enable, ui->lbl_cal_badge,
+                          cal_on, cal_on ? "已开启" : "已关闭");
+        if (ui->btn_cal_compare && ui->lbl_cal_compare) {
+            if (cal_cmp) {
+                lv_obj_add_state(ui->btn_cal_compare, LV_STATE_CHECKED);
+                lv_obj_t *t = lv_obj_get_child(ui->btn_cal_compare, 0);
+                if (t) lv_obj_set_style_text_color(t, ZVP_COLOR_BG_BLACK, 0);
+                lv_obj_set_style_text_color(ui->lbl_cal_compare, ZVP_COLOR_BG_BLACK, 0);
+                lv_label_set_text(ui->lbl_cal_compare, "原色预览中");
+            } else {
+                lv_obj_clear_state(ui->btn_cal_compare, LV_STATE_CHECKED);
+                lv_obj_t *t = lv_obj_get_child(ui->btn_cal_compare, 0);
+                if (t) lv_obj_set_style_text_color(t, ZVP_COLOR_WHITE, 0);
+                lv_obj_set_style_text_color(ui->lbl_cal_compare, ZVP_COLOR_TEXT_SUB, 0);
+                lv_label_set_text(ui->lbl_cal_compare, cal_on ? "校色生效中" : "点击对比");
+            }
+        }
+        if (ui->lbl_cal_preset) {
+            const zvp_cal_preset_info_t *pi = zvp_cal_get_preset(rt->color_cal.preset_idx);
+            lv_label_set_text(ui->lbl_cal_preset, pi ? pi->short_name : "自定义");
+        }
+        if (ui->lbl_cal_status) {
+            char stbuf[96];
+            snprintf(stbuf, sizeof(stbuf), "%s\n重刷:%u",
+                     rt->color_cal.factory_captured ? "已备份原厂" : "待采集基准",
+                     (unsigned)rt->color_cal.reapply_count);
+            lv_label_set_text(ui->lbl_cal_status, stbuf);
+        }
+
+        static const char *const k_cal_top_names[ZVP_CAL_PARAM_COUNT] = {
+            "色温(暖/冷)", "色调(红/绿)", "饱和度", "对比度", "伽马(明暗)", "红增益(R)", "绿增益(G)", "蓝增益(B)"
+        };
+        uint32_t sel_p = ((uint32_t)ui->cal_sel_param < ZVP_CAL_PARAM_COUNT)
+                             ? (uint32_t)ui->cal_sel_param
+                             : 0u;
+        if (ui->lbl_cal_top_param) {
+            if (cal_cmp) {
+                lv_label_set_text(ui->lbl_cal_top_param, "原色对比预览中 · OK/点击恢复");
+            } else {
+                int v = (int)rt->color_cal.params.vals[sel_p];
+                char tbuf[64];
+                snprintf(tbuf, sizeof(tbuf), "%s: %s%d", k_cal_top_names[sel_p], (v > 0) ? "+" : "", v);
+                lv_label_set_text(ui->lbl_cal_top_param, tbuf);
+            }
+        }
+        for (uint32_t i = 0u; i < ZVP_CAL_PARAM_COUNT; i++) {
+            if (ui->cal_param_btns[i] && ui->cal_param_vals[i]) {
+                int v = (int)rt->color_cal.params.vals[i];
+                char vbuf[16];
+                snprintf(vbuf, sizeof(vbuf), "%s%d", (v > 0) ? "+" : "", v);
+                bool active_tile = (i == sel_p);
+                set_badge_checked(ui->cal_param_btns[i], lv_obj_get_child(ui->cal_param_btns[i], 0),
+                                  active_tile, NULL);
+                lv_obj_set_style_text_color(ui->cal_param_vals[i],
+                                            active_tile ? ZVP_COLOR_BG_BLACK : ZVP_COLOR_WHITE, 0);
+                lv_label_set_text(ui->cal_param_vals[i], vbuf);
+            }
+        }
+    }
+
     if ((rt->input.menu_visible || rt->input.mini_widget_visible ||
          zvp_aspect_should_display(&rt->aspect, rt->input.menu_visible)) &&
         ui->scr) {
@@ -2883,6 +3330,15 @@ void zvp_ui_sync_overlay(zvp_ui_t *ui)
                         lv_obj_add_flag(ui->lut_fine_layer, LV_OBJ_FLAG_HIDDEN);
                     }
                 }
+                bool show_cal_layers = (ui->active_page == ZVP_PAGE_COLOR_CAL);
+                if (ui->cal_top_layer) {
+                    if (show_cal_layers) lv_obj_clear_flag(ui->cal_top_layer, LV_OBJ_FLAG_HIDDEN);
+                    else lv_obj_add_flag(ui->cal_top_layer, LV_OBJ_FLAG_HIDDEN);
+                }
+                if (ui->cal_fine_layer) {
+                    if (show_cal_layers) lv_obj_clear_flag(ui->cal_fine_layer, LV_OBJ_FLAG_HIDDEN);
+                    else lv_obj_add_flag(ui->cal_fine_layer, LV_OBJ_FLAG_HIDDEN);
+                }
                 lv_obj_add_flag(ui->mini_win, LV_OBJ_FLAG_HIDDEN);
             } else {
                 ui->lut_fine_visible = false;
@@ -2893,6 +3349,12 @@ void zvp_ui_sync_overlay(zvp_ui_t *ui)
                 }
                 if (ui->lut_fine_layer) {
                     lv_obj_add_flag(ui->lut_fine_layer, LV_OBJ_FLAG_HIDDEN);
+                }
+                if (ui->cal_top_layer) {
+                    lv_obj_add_flag(ui->cal_top_layer, LV_OBJ_FLAG_HIDDEN);
+                }
+                if (ui->cal_fine_layer) {
+                    lv_obj_add_flag(ui->cal_fine_layer, LV_OBJ_FLAG_HIDDEN);
                 }
                 if (show_mini) {
                     lv_obj_clear_flag(ui->mini_win, LV_OBJ_FLAG_HIDDEN);
@@ -2927,6 +3389,12 @@ void zvp_ui_sync_overlay(zvp_ui_t *ui)
             }
             if (ui->lut_fine_layer) {
                 lv_obj_add_flag(ui->lut_fine_layer, LV_OBJ_FLAG_HIDDEN);
+            }
+            if (ui->cal_top_layer) {
+                lv_obj_add_flag(ui->cal_top_layer, LV_OBJ_FLAG_HIDDEN);
+            }
+            if (ui->cal_fine_layer) {
+                lv_obj_add_flag(ui->cal_fine_layer, LV_OBJ_FLAG_HIDDEN);
             }
             lv_obj_add_flag(ui->mini_win, LV_OBJ_FLAG_HIDDEN);
             sync_aspect_overlay_visual(ui, rt, false);

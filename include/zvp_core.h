@@ -230,6 +230,23 @@ uint32_t zvp_input_process_touch(zvp_input_state_t *st,
                                  int16_t raw_y,
                                  bool is_down);
 
+/* 检查当前进程可执行文件路径是否为目标相机主进程 im.elf（防止 preload 误注入子进程） */
+static inline bool zvp_is_target_im_exe_path(const char *exe_path)
+{
+    if (!exe_path || exe_path[0] == '\0') {
+        return false;
+    }
+    const char *base = exe_path;
+    for (size_t i = 0u; exe_path[i] != '\0'; ++i) {
+        if (exe_path[i] == '/') {
+            base = &exe_path[i + 1u];
+        }
+    }
+    return base[0] == 'i' && base[1] == 'm' && base[2] == '.' &&
+           base[3] == 'e' && base[4] == 'l' && base[5] == 'f' &&
+           base[6] == '\0';
+}
+
 /* 全局上下文访问与跨模块桥梁（供 UI、LVGL port 与入口层协调） */
 void zvp_logf(const char *fmt, ...);
 uint64_t zvp_monotonic_ms(void);

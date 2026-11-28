@@ -442,6 +442,7 @@ def run(args):
         runtime = Runtime(backend, upload_verified)
         probe.run_cam = runtime.run_cam
         probe.read_firmware_bytes = runtime.read_firmware_bytes
+        probe.TRANSPORT = "jiritsu"
         if args.preload_status:
             return probe.cmd_preload_status()
         if args.reset_boot_guard:

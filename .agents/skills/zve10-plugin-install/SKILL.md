@@ -22,7 +22,7 @@ description: >-
    - 相机已插入 SD 卡并开机；
    - 相机菜单：`设置 (Setup) -> USB 连接模式 -> 大容量存储 (Mass Storage)`；
    - 通过数据线直连电脑（避免使用不稳定扩展坞）；
-   - **Windows 首次使用驱动（Zadig `libusbK`）**：如果 `--check` 检测不到设备，请先引导用户下载 [`zadig-2.9.exe`](https://github.com/pbatard/libwdi/releases/download/v1.5.1/zadig-2.9.exe)，连接相机后在 Zadig 中选中相机设备（必要时勾选 `Options -> List All Devices`），**安装 `libusbK` 版本驱动**；
+   - **Windows 首次使用驱动（Zadig `libusbK`）**：如果 `--check` 检测不到设备，请先引导用户下载 [`zadig-2.9.exe`](https://github.com/pbatard/libwdi/releases/download/v1.5.1/zadig-2.9.exe)，连接相机后在 Zadig 中勾选 `Options -> List All Devices`，分别对相机 **大容量存储 (`054C:0D95`)** 与 **Sony 服务模式 (`054C:0336`)** **安装 `libusbK` 版本驱动**（切勿使用 MTP / PC 遥控模式 `0x0994`）；
    - **务必提前告知用户**：连接 USB 后相机屏幕出现 **「请检查所连接的设备」** 属于**正常现象，绝对不能拔掉数据线**，保持连接即可。
 3. **宿主机工具依赖**：
    - 必须已安装 [`uv`](https://docs.astral.sh/uv/)；
@@ -35,8 +35,9 @@ description: >-
 
 1. **严禁并发操作 USB / `camtool`**：同一时刻只能运行一个 `probe_zve10_runtime.py` 或 `cam.py` 进程；推送、启用、重启、等待、读取日志必须**单命令严格串行**执行。
 2. **推送前必须校验 ELF ABI**：只要重新编译了 `build-arm/libzve10plugin.so`，推送前必须执行 `tools/verify_elf_abi.py` 并确认输出 `ELF/ABI/GLIBC 约束全部校验通过`（目标板仅支持 ARMv7 soft-float EABI5 与 `<= GLIBC_2.11.2`）。
-3. **禁止直接覆写内存已映射文件**：切勿手动 `cam.py put` 覆写 `/tmp/libzve10plugin.so`，必须使用 `probe_zve10_runtime.py --stage-tmp`（内置先 `rm -f` 再上传逻辑）。
-4. **先体检再启用**：首次启用前务必运行 `--check`，确认 `cam.py doctor` 正常以及原厂基线字节校验通过（`libNetService.so` 为 `90 b5 95 b0`，`CautionConfig.so` 为 `20`）。
+3. **禁止直接覆写内存已映射文件，禁止走 `0xff01` 直接写 2.03 文件**：切勿手动 `cam.py put` 覆写 `/tmp/libzve10plugin.so`，必须使用 `probe_zve10_runtime.py --stage-tmp`（统一通过 `/tmp/jiritsu/` 中转 + 目标目录临时文件原子 `mv`，全面兼容 2.02/2.03）。
+4. **先体检再启用**：首次启用前务必运行 `--check`，确认 USB / Jiritsu / `sh` 通道与 `/setting/kemco.txt` 状态正常（脚本不依赖 `od` 也不因缺失 `backup/*.bin` 中断），且原厂基线字节校验通过（`libNetService.so` 为 `90 b5 95 b0`，`CautionConfig.so` 为 `20`）。
+5. **严禁手动改写 `/setting/kemco.txt`**：如需启用冷启动 (`warm.mode=0`) 或还原暖启动 (`warm.mode=2`)，只能调用 `--enable-coldboot` / `--restore-warmboot`（内置首次原厂基线备份 `backups/kemco/kemco.txt.orig`、单字节锚点校对与写后 SHA-256 回读自动回滚保护）。
 
 ---
 
@@ -146,9 +147,25 @@ uv run python tools/probe_zve10_runtime.py --enable-preload
 命令会打印门禁判定、写入内容，并回读核对 `dmode=3p` 与 `preload` 是否一致；
 任何不一致都会返回非 0 并停止后续步骤。
 
+### Step 4.5（2.02 / 2.03 零售机开启持久加载，约 1 秒极速冷启）：切换 `warm.mode=0`
+
+如果 `--check` 或 `--enable-preload` 提示 `/setting/kemco.txt` 当前为 `warm.mode=2`（2.02/2.03 出厂暖启动镜像机制会绕过 `bootin.elf`，导致重启不生效），向用户确认开启冷启动持久模式后执行：
+
+```powershell
+uv run python tools/probe_zve10_runtime.py --enable-coldboot
+```
+
+> 说明：脚本会自动备份原厂 `/setting/kemco.txt` 至 `backups/kemco/kemco.txt.orig`，仅单字节将 `warm.mode=2` 改为 `warm.mode=0` 并执行 SHA-256 回读核对。
+>
+> 注意：`--enable-coldboot` / `--restore-warmboot` 只支持默认 camtool 后端（走 `/tmp/jiritsu/` 中转，
+> 同样兼容 2.03），不能与 `--backend jiritsu` 同时使用；回退原厂时执行 `--restore-warmboot` 再 `--reboot`。
+> 该路径与下面的 **WBI 冷启动 Runbook** 是两条不同入口：若切换后重启仍看不到 `LD_PRELOAD` 或插件日志，
+> 请按 [`docs/WBI_COLDBOOT_RUNBOOK.md`](../../../docs/WBI_COLDBOOT_RUNBOOK.md) 的受控冷启动流程处理，
+> 不要反复改写 `/setting/kemco.txt`。
+
 ### Step 5：重启相机并等待重连，拉取运行日志验证
 
-使用串行命令执行重启、等待 30 秒设备重连与读取日志（`--reboot` 已内置串行 `reboot` + `wait 30` 与 `PMCA_ROOT` 注入）：
+使用串行命令执行重启与读取日志（`--reboot` 会串行发送 `reboot --confirm`）：
 
 ```powershell
 uv run python tools/probe_zve10_runtime.py --reboot; if ($LASTEXITCODE -eq 0) { uv run python tools/probe_zve10_runtime.py --logs }
@@ -187,9 +204,19 @@ uv run python tools/probe_zve10_runtime.py --backend jiritsu --preload-status
 
 - **用户想要恢复原厂引导 / 卸载插件**：
   ```powershell
-  uv run python tools/probe_zve10_runtime.py --disable-preload; if ($LASTEXITCODE -eq 0) { uv run python tools/probe_zve10_runtime.py --reboot }
+  uv run python tools/probe_zve10_runtime.py --disable-preload
+  # 若先前启用过 --enable-coldboot 且想同时恢复原厂 warm.mode=2 暖启动：
+  uv run python tools/probe_zve10_runtime.py --restore-warmboot
+  uv run python tools/probe_zve10_runtime.py --reboot
   ```
   执行完成后，相机即重启切回原厂 `mode 3` 无注入状态。
+- **诊断注入/看门狗状态或清理崩溃计数**：
+  ```powershell
+  uv run python tools/probe_zve10_runtime.py --preload-status
+  uv run python tools/probe_zve10_runtime.py --reset-boot-guard
+  ```
+- **日志显示 `NO_LOG`**：
+  - 使用 `--preload-status` 检查是否仍为 `warm.mode=2`（需运行 `--enable-coldboot`），或是否缺少 `/tmp/libzve10plugin.so`、`dmode` 非 `3p`、触发了看门狗自熔断 (`trip_count > 0`)。
 - **日志显示 `卡控门禁拦截启动`**：
   - `DISABLED_NO_CARD`：请插入 SD 卡后再开机；
   - `DISABLED_KILL_FILE`：SD 卡根目录或 `/tmp/` 存在 `ZVP_OFF` 文件，删除后重启即可恢复。

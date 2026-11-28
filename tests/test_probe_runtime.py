@@ -50,7 +50,8 @@ class DeploymentTests(unittest.TestCase):
 
     def test_failed_unlink_stops_upload(self):
         with tempfile.NamedTemporaryFile() as source:
-            with patch.object(probe, "run_cam", return_value=
+            with patch.object(probe, "run_verify_abi", return_value=0), \
+                 patch.object(probe, "run_cam", return_value=
                               subprocess.CompletedProcess([], 1, "unlink failed", "")) as command:
                 self.assertEqual(probe.cmd_stage_tmp(source.name), 1)
                 self.assertEqual(command.call_count, 1)

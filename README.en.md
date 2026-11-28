@@ -37,6 +37,9 @@ Non-destructive · Clean semi-transparent menu · Instant safe rollback
 - **📐 Aspect Ratio Guides · 12 Framing Presets**  
   Non-destructive live-view framing masks (`2.39:1`, `2.35:1`, `16:9`, `4:3`, `1:1`, `9:16`, etc.) with adjustable mask opacity and rule-of-thirds overlay lines.
 
+- **🖥️ 11-bit Real-Time Display Calibration · LCD-Only**  
+  Drives the on-camera display pipeline (3×3 color matrix + 3×33 1D LUT) in RAM only, improving rear-LCD viewing accuracy **without altering recorded JPG/RAW stills or video files**. Supports 8-axis tuning (Temperature, Tint, Saturation, Contrast, Gamma, R/G/B gains from `-30` to `+30`), presets (`D65 Standard`, `Apple P3`, `Cool Clear`, `High Contrast`, `Low Sat`), one-tap original comparison, and automatic re-apply across UI switches.
+
 - **📶 5GHz Wi-Fi Unlock · Faster Transfers**  
   Break free from the stock 2.4GHz speed cap. Enable 5GHz Wi-Fi with one tap and choose between `Auto` or 9 channels (`36, 40, 44, 48, 149, 153, 157, 161, 165`) for faster, more reliable transfers to your phone or computer.
 
@@ -102,7 +105,7 @@ Non-destructive · Clean semi-transparent menu · Instant safe rollback
 
 ## 📋 Feature Roadmap
 
-The main menu contains **10 entries**. **Filter (Creative Look + LUT)**, **5G WiFi**, **Shutter Sound**, **Aspect Ratio**, and **Settings (including Native Menu/Fn Touch)** are ready for daily use:
+The main menu contains **10 entries**. **Filter (Creative Look + LUT)**, **5G WiFi**, **Shutter Sound**, **Color Cal (Display Calibration)**, **Aspect Ratio**, and **Settings (including Native Menu/Fn Touch)** are ready for daily use:
 
 | # | Menu Entry | Status | Description |
 | :---: | :--- | :---: | :--- |
@@ -110,7 +113,7 @@ The main menu contains **10 entries**. **Filter (Creative Look + LUT)**, **5G Wi
 | 2 | **5G WiFi** | ✅ Ready | One-tap 5GHz unlock with `Auto` and 9 selectable channels |
 | 3 | **Share (`共享`)** | 🚧 Planned | Reserved menu slot; planned for LAN / FTP photo transfer |
 | 4 | **Shutter Sound (`快门音`)** | ✅ Ready | 2 built-in presets, SD card WAV support, and shooting mini widget |
-| 5 | **Color Cal (`校色`)** | 🚧 Planned | Reserved menu slot; coming in a future update |
+| 5 | **Color Cal (`校色`)** | ✅ Ready | 11-bit LCD-only display calibration (8 axes, 5 presets, one-tap original compare) |
 | 6 | **Aspect Ratio (`比例`)** | ✅ Ready | 12 framing ratio masks, adjustable opacity, and rule-of-thirds guides |
 | 7 | **USB Rec (`外录`)** | 🚧 Planned | Reserved menu slot; coming in a future update |
 | 8 | **Oversampling (`超采`)** | 🚧 Planned | Reserved menu slot; coming in a future update |
@@ -134,12 +137,13 @@ Safety and reversibility come first. You can return to 100% stock camera behavio
 
 ## 🛠️ Installation & Developer Guide
 
-> A permanent standalone installer is not yet available. Right now, the plugin is loaded temporarily over USB from a computer (rebooting or disabling preload returns the camera to stock).
+> Deployment is performed over USB using the helper tool. Because `/tmp` resides in RAM and stock `2.02 / 2.03` firmware defaults to warm-boot (`warm.mode=2`), `--enable-preload` alone will not persist across power cycles on retail `2.02/2.03` cameras. To enable ~1s persistent cold-boot loading across reboots, run `--enable-coldboot` (which backs up `/setting/kemco.txt` locally first and flips only `warm.mode` to `0` with SHA-256 verification), and revert anytime with `--restore-warmboot`.
 
 > [!WARNING]
 > **Important USB Driver & On-Camera Prompt Notice (Windows)**:
-> 1. **Install `libusbK` Driver via Zadig**: Download [`zadig-2.9.exe`](https://github.com/pbatard/libwdi/releases/download/v1.5.1/zadig-2.9.exe), connect your powered-on camera in **Mass Storage** mode, select the camera in Zadig, and **install the `libusbK` driver**.
+> 1. **Install `libusbK` for Both USB PIDs via Zadig**: Download [`zadig-2.9.exe`](https://github.com/pbatard/libwdi/releases/download/v1.5.1/zadig-2.9.exe), set the camera USB Connection to **Mass Storage** (if stuck in MTP / PC Remote `0x0994`, switch back to Mass Storage first), enable `Options -> List All Devices` in Zadig, and install **`libusbK`** for both the Mass Storage PID (**`054C:0D95`**) and the Sony Service Mode PID (**`054C:0336`**).
 > 2. **Do NOT Unplug the Cable**: When connecting USB or communicating with the camera, seeing **"Check the connected device"** / **「请检查所连接的设备」** on the camera screen is **completely normal — NEVER unplug the USB cable**. Keep it connected and proceed.
+> 3. **Firmware `2.01 / 2.02 / 2.03` Compatible**: Staging and probe commands use the Jiritsu (`/tmp/jiritsu/`) staging channel rather than `0xff01 FileControl` (disabled on `2.03`) and do not rely on on-camera `od`.
 
 <details>
 <summary><b>Click to expand: Build instructions, tests, USB staging commands & repository structure</b></summary>
@@ -192,27 +196,34 @@ The following steps use the default Camtool backend.
 
 By default, the helper script prefers `build-arm/libzve10plugin.so` if present, otherwise uses [`prebuilt/libzve10plugin.so`](prebuilt/libzve10plugin.so), and invokes the bundled submodule `third_party/camtool/cam.py` (overridable via `--cam-py` / `ZVP_CAM_PY`).
 
-1. **Install Windows USB Driver (First Time)**: Download [`zadig-2.9.exe`](https://github.com/pbatard/libwdi/releases/download/v1.5.1/zadig-2.9.exe), turn on your camera with USB Connection set to **Mass Storage**, connect it to the PC, select the camera in Zadig (`Options -> List All Devices` if hidden), and install the **`libusbK`** driver.
+1. **Install Windows USB Driver (First Time)**: Download [`zadig-2.9.exe`](https://github.com/pbatard/libwdi/releases/download/v1.5.1/zadig-2.9.exe), turn on your camera with USB Connection set to **Mass Storage**, connect it to the PC, enable `Options -> List All Devices` in Zadig, and install **`libusbK`** for both **`054C:0D95`** and Service Mode **`054C:0336`**.
 2. **Keep Cable Connected**: If the camera screen displays **"Check the connected device"** (**「请检查所连接的设备」**), this is **normal — do NOT unplug the USB cable**. Proceed with the commands below:
 
 ```powershell
-# 1. Check connection (read-only)
+# 1. Check connection, warm.mode, and firmware bytes (read-only, 2.02/2.03 safe)
 uv run python tools/probe_zve10_runtime.py --check
 
-# 2. Push plugin to temporary camera storage
+# 2. Check current preload, warm.mode, and boot guard counters (read-only)
+uv run python tools/probe_zve10_runtime.py --preload-status
+
+# 3. Push plugin to camera /tmp (via Jiritsu staging + ABI verification)
 uv run python tools/probe_zve10_runtime.py --stage-tmp
 
-# 3. Enable preload (takes effect after reboot)
+# 4. Enable preload (takes effect after reboot)
 uv run python tools/probe_zve10_runtime.py --enable-preload
 
-# 4. Reboot camera and wait for reconnection
+# 5. (Optional, ~1s persistent cold-boot on retail 2.02/2.03) Back up /setting/kemco.txt & switch warm.mode=0
+uv run python tools/probe_zve10_runtime.py --enable-coldboot
+
+# 6. Reboot camera and wait for reconnection
 uv run python tools/probe_zve10_runtime.py --reboot
 
-# 5. View runtime logs
+# 7. View runtime logs (use --reset-boot-guard if watch-dog tripped during testing)
 uv run python tools/probe_zve10_runtime.py --logs
 
-# 6. Disable preload and restore stock boot (then run --reboot)
+# 8. Disable preload and restore stock boot (plus --restore-warmboot if warm.mode=0 was enabled)
 uv run python tools/probe_zve10_runtime.py --disable-preload
+uv run python tools/probe_zve10_runtime.py --restore-warmboot
 ```
 
 > **Important**: Never run multiple `camtool` / USB commands concurrently. Always serialize stage, reboot, and log commands.

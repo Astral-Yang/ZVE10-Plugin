@@ -1695,6 +1695,31 @@ int zvp_bridge_init_lut_ops(zvp_lut_platform_ops_t *out_lut_ops)
     return 0;
 }
 
+static int cal_plat_remove_file(const char *path)
+{
+    if (!path || !path[0]) {
+        return -EINVAL;
+    }
+    if (unlink(path) != 0 && errno != ENOENT) {
+        return -(errno > 0 ? errno : EIO);
+    }
+    return 0;
+}
+
+int zvp_bridge_init_color_cal_ops(zvp_color_cal_platform_ops_t *out_ops)
+{
+    if (!out_ops) {
+        return -1;
+    }
+    memset(out_ops, 0, sizeof(*out_ops));
+    out_ops->phys_read         = craw_phys_read;
+    out_ops->phys_write        = craw_phys_write;
+    out_ops->read_file         = lut_plat_read_file;
+    out_ops->atomic_write_file = lut_plat_atomic_write_file;
+    out_ops->remove_file       = cal_plat_remove_file;
+    return 0;
+}
+
 int zvp_bridge_init_menu_touch_ops(zvp_menu_touch_ops_t *out_ops)
 {
     if (!out_ops) {

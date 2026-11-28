@@ -883,13 +883,21 @@ int zvp_lut_shutdown_reset(zvp_lut_ctx_t *ctx)
     if (!ctx || !ctx->initialized) {
         return 0;
     }
+    ctx->fine_editing = false;
+    ctx->cfg_dirty = false;
     if (!ctx->kmod_loaded) {
         ctx->active_sel = 0u;
+        if (ctx->ops.atomic_write_file) {
+            (void)save_cfg_to_disk(ctx);
+        }
         return 0;
     }
     int rc = apply_kernel_selection(ctx, 0u);
     ctx->active_sel = 0u;
     refresh_preview_if_needed(ctx, 0u);
+    if (ctx->ops.atomic_write_file) {
+        (void)save_cfg_to_disk(ctx);
+    }
     return rc;
 }
 

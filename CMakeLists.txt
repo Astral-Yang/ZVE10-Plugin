@@ -17,6 +17,7 @@ set(ZVP_LOGIC_SOURCES
     src/zvp_aspect.c
     src/zvp_craw.c
     src/zvp_lut.c
+    src/zvp_color_cal.c
     src/zvp_menu_touch.c
 )
 
