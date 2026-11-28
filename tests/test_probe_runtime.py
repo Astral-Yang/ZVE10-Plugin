@@ -79,6 +79,13 @@ class DeploymentTests(unittest.TestCase):
         self.assertFalse(any("&& mv " in call.args[0] for call in backend.run.call_args_list))
         self.assertTrue(backend.run.call_args.args[0].startswith("rm -f "))
 
+    def test_jiritsu_run_cam_accepts_probe_timeout_keyword(self):
+        backend = Mock()
+        backend.command.return_value = {"exit_code": 0, "output": "ok\n"}
+        result = Runtime(backend, Mock()).run_cam(["doctor"], timeout=35.0)
+        self.assertEqual(result.returncode, 0)
+        self.assertIn("Jiritsu", result.stdout)
+
     def test_jiritsu_baseline_uses_binary_reads(self):
         backend = Mock(ram="/tmp_network/zve10-test")
         backend.read_path.side_effect = [(0, bytes.fromhex("90 b5 95 b0")), (0, b"\x20")]

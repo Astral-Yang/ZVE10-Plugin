@@ -94,7 +94,9 @@ class Runtime:
         return subprocess.CompletedProcess(["put", source, destination], 0,
                                            f"SHA-256 verified: {digest}\n", "")
 
-    def run_cam(self, arguments, capture=True):
+    def run_cam(self, arguments, capture=True, timeout=None):
+        # timeout 由探针统一传入；Jiritsu 的 backend.command 自带超时与重试，
+        # 这里只接受该关键字以保持与 camtool 版 run_cam 的签名一致。
         if arguments == ["doctor"]:
             return subprocess.CompletedProcess(arguments, 0,
                                                "Jiritsu 2.03 双次固件校验、UID=0 与持久会话已就绪\n", "")
