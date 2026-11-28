@@ -37,6 +37,9 @@
 - **📐 构图纵横比遮罩 · 12 档画幅参考线**  
   支持实时取景画幅参考遮罩（2.39:1、2.35:1、16:9、4:3、1:1、9:16 等 12 档）、透明压暗浓度调节与三分构图辅助线。
 
+- **🖥️ 11-bit 屏幕实时校色 · 仅作用于 LCD 屏显**  
+  直接驱动机身显示管线（3×3 色彩矩阵 + 3×33 点 1D LUT），只改善机背 LCD 观感，**完全不影响拍照 JPG/RAW 与视频成片**。支持色温、色调、饱和度、对比度、伽马与 RGB 三通道增益（`-30 ~ +30`）8 项微调，提供 `D65 标准 / 苹果风 / 冷白 / 高对比 / 低饱和` 等预设及「一键对比原色」，纯 RAM 挂载并在切界面后自动守护重刷。
+
 - **📶 5GHz Wi-Fi 解锁 · 传图更快更稳**  
   突破原厂仅限 2.4GHz 的传输限制，一键开启 5GHz 频段，并支持 `Auto` 自动选择以及 `36 / 40 / 44 / 48 / 149 / 153 / 157 / 161 / 165` 共 9 个常用信道，连接手机或电脑传图更流畅。
 
@@ -102,7 +105,7 @@
 
 ## 📋 功能进度
 
-插件左侧共规划了 **10 个一级菜单入口**，当前已上线 **滤镜（外观+LUT）、5GHz WIFI、快门音效、比例（纵横比遮罩）、设置与安全（含原厂菜单/Fn 全界面触控）** 等核心模块：
+插件左侧共规划了 **10 个一级菜单入口**，当前已上线 **滤镜（外观+LUT）、5GHz WIFI、快门音效、屏幕校色、比例（纵横比遮罩）、设置与安全（含原厂菜单/Fn 全界面触控）** 等核心模块：
 
 | 序号 | 菜单名称 | 状态 | 说明 |
 | :---: | :--- | :---: | :--- |
@@ -110,7 +113,7 @@
 | 2 | **5G WiFi** | ✅ 已可用 | 一键解锁 5GHz 频段，支持 Auto 与 9 个常用信道切换 |
 | 3 | **共享** | 🚧 规划中 | 菜单已预留位置，计划支持局域网 / FTP 传图 |
 | 4 | **快门音** | ✅ 已可用 | 内置 2 款预设 + SD 卡 WAV 读取 + 拍摄悬浮窗快速试听切换 |
-| 5 | **校色** | 🚧 规划中 | 菜单已预留位置，功能正在开发中 |
+| 5 | **校色** | ✅ 已可用 | 11-bit 硬件显示管线实时校色（8 项参数 + 5 预设 + 一键对比原色），仅影响机背屏显 |
 | 6 | **比例** | ✅ 已可用 | 12 档构图纵横比遮罩、透明压暗调节与三分辅助线 |
 | 7 | **外录** | 🚧 规划中 | 菜单已预留位置，功能正在开发中 |
 | 8 | **超采** | 🚧 规划中 | 菜单已预留位置，功能正在开发中 |
@@ -134,12 +137,13 @@
 
 ## 🛠️ 安装与开发者说明
 
-> 目前项目仍在迭代中，暂未发布写入相机内置存储的“一键永久安装包”，现阶段通过电脑 USB 连接相机进行临时载入与体验（重启或关闭注入即可恢复原厂）。
+> 现阶段通过电脑 USB 连接相机完成注入部署。`/tmp` 为内存临时盘，仅设置 `--enable-preload` 时重启会失效（且零售机 `2.02 / 2.03` 默认的 `warm.mode=2` 暖启动会跳过引导加载器）；需要开机自动持久生效并保持 ~1 秒快启时，可使用工具链提供的 `--enable-coldboot`（先备份再安全切换为 `warm.mode=0`），随时也可一键还原。
 
 > [!WARNING]
 > **Windows 连机驱动与屏幕提示必读**：
-> 1. **首次连接请先装驱动**：下载 [`zadig-2.9.exe`](https://github.com/pbatard/libwdi/releases/download/v1.5.1/zadig-2.9.exe)，相机开机设为 **大容量存储** 并连接电脑，在 Zadig 中选中相机设备后，驱动版本必须选择 **`libusbK`** 并点击安装。
+> 1. **首次连接请安装双 PID `libusbK` 驱动**：下载 [`zadig-2.9.exe`](https://github.com/pbatard/libwdi/releases/download/v1.5.1/zadig-2.9.exe)，相机开机且 USB 模式设为 **大容量存储 (Mass Storage)**（若为 MTP / PC遥控 `0x0994` 请先改回大容量存储）后接上电脑；在 Zadig 勾选 `Options -> List All Devices`，为相机日常存储设备 **`054C:0D95`** 与切入 Sony 服务模式后的 **`054C:0336`** 安装 **`libusbK`** 驱动。
 > 2. **切勿拔掉数据线**：连接 USB 或通信期间，若相机屏幕弹出 **「请检查所连接的设备」**，这属于**完全正常的联机现象，绝对不能拔掉数据线**，保持连接继续操作即可。
+> 3. **兼容固件 `2.01 / 2.02 / 2.03`**：部署脚本已统一通过 Jiritsu (`/tmp/jiritsu/`) 通道收发文件，自动绕开 `2.03` 固件禁用的旧 `0xff01` 通道与机端缺失的 `od` 工具。
 
 <details>
 <summary><b>点此展开：编译环境、测试命令、相机载入与项目目录（面向开发者与进阶用户）</b></summary>
@@ -176,27 +180,34 @@ uv run --with pillow python tools/gen_zh_font.py
 ### 3. 通过电脑连接相机载入体验
 部署脚本默认会自动优先使用 `build-arm/libzve10plugin.so`，若未编译则直接使用仓库内置的 `prebuilt/libzve10plugin.so`，并自动调用内置子模块 `third_party/camtool/cam.py`（也可通过 `--cam-py` / `ZVP_CAM_PY` 指定其他路径）。
 
-1. **配置 Windows USB 驱动（首次需要）**：下载并运行 [`zadig-2.9.exe`](https://github.com/pbatard/libwdi/releases/download/v1.5.1/zadig-2.9.exe)，相机开机且 USB 连接模式设为 **大容量存储** 后接上电脑；在 Zadig 下拉框找到相机设备（如未出现可勾选 `Options -> List All Devices`），将驱动切换安装为 **`libusbK`** 版本。
+1. **配置 Windows USB 驱动（首次需要）**：下载并运行 [`zadig-2.9.exe`](https://github.com/pbatard/libwdi/releases/download/v1.5.1/zadig-2.9.exe)，相机开机且 USB 连接模式设为 **大容量存储** 后接上电脑；在 Zadig 勾选 `Options -> List All Devices`，为 **`054C:0D95`** 与服务模式 **`054C:0336`** 安装 **`libusbK`** 驱动。
 2. **连接注意**：相机屏幕出现 **「请检查所连接的设备」** 时**属于正常现象，绝对不能拔掉数据线**！保持联机依次执行下列命令：
 
 ```powershell
-# 1. 检查相机连接状态（只读）
+# 1. 检查相机连接状态、warm.mode 与固件校验字节（只读，兼容 2.02/2.03）
 uv run python tools/probe_zve10_runtime.py --check
 
-# 2. 上传插件到相机临时目录
+# 2. 查看当前 preload、warm.mode 与开机看门狗状态（只读）
+uv run python tools/probe_zve10_runtime.py --preload-status
+
+# 3. 上传插件到相机 /tmp（自动走 Jiritsu 通道并校验 ABI）
 uv run python tools/probe_zve10_runtime.py --stage-tmp
 
-# 3. 启用注入引导（重启相机后生效）
+# 4. 启用原生 preload 引导（重启相机后生效）
 uv run python tools/probe_zve10_runtime.py --enable-preload
 
-# 4. 重启相机并等待重新连线
+# 5. （可选，2.02/2.03 零售机开启约 1 秒冷启持久化）备份 /setting/kemco.txt 并安全切为 warm.mode=0
+uv run python tools/probe_zve10_runtime.py --enable-coldboot
+
+# 6. 重启相机并等待重新连线
 uv run python tools/probe_zve10_runtime.py --reboot
 
-# 5. 查看运行日志
+# 7. 查看运行日志（若之前触发看门狗熔断可用 --reset-boot-guard 清理计数）
 uv run python tools/probe_zve10_runtime.py --logs
 
-# 6. 关闭注入并恢复原厂默认启动模式（随后 --reboot 重启生效）
+# 8. 关闭注入并恢复原厂启动（随后 --reboot 重启生效；如改过冷启动可用 --restore-warmboot 恢复 warm.mode=2）
 uv run python tools/probe_zve10_runtime.py --disable-preload
+uv run python tools/probe_zve10_runtime.py --restore-warmboot
 ```
 
 > **提示**：切勿同时并发运行多个 `camtool` / USB 命令，推送、重启与拉取日志请依次执行。

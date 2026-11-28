@@ -229,8 +229,9 @@ static int zvp_runtime_full_reset_cb(void *user_data)
     rt->last_shutter_trig_ms = 0u;
     zvp_sound_reset(&rt->sound);
 
-    /* 2. 回退 2K cRAW、自定义 LUT、纵横比遮罩、输入按键模式与屏幕翻转自适应至插件默认状态 */
+    /* 2. 回退 2K cRAW、自定义 LUT、屏幕校色、纵横比遮罩、输入按键模式与屏幕翻转自适应至插件默认状态 */
     (void)zvp_lut_shutdown_reset(&rt->lut);
+    (void)zvp_color_cal_shutdown_reset(&rt->color_cal, true);
     zvp_craw_shutdown(&rt->craw);
     zvp_aspect_reset_defaults(&rt->aspect);
     zvp_input_set_c1_mode(&rt->input, ZVP_C1_MODE_SHORT_EXCLUSIVE);
@@ -365,8 +366,10 @@ static void rollback_state_on_gate_block(zvp_gate_status_t st,
         }
     } else if (st == ZVP_GATE_DISABLED_KILL_FILE) {
         zvp_runtime_reset_prefs();
+        (void)unlink(ZVP_CAL_CFG_PATH);
     } else if (st == ZVP_GATE_DISABLED_UNINSTALL) {
         zvp_runtime_reset_prefs();
+        (void)unlink(ZVP_CAL_CFG_PATH);
         bool un_ok = zvp_boot_guard_disable_preload(
             &s_bg_ops, ZVP_MODE_DMODE_PATH, ZVP_MODE_PRELOAD_PATH);
         (void)unlink(ZVP_BOOT_GUARD_PATH);
@@ -454,6 +457,16 @@ static void ensure_boot_evaluated_ui_thread(uint64_t now)
              g_rt.lut.kmod_loaded ? 1 : 0,
              g_rt.lut.last_preview.rc);
 
+    zvp_color_cal_platform_ops_t ccops;
+    zvp_bridge_init_color_cal_ops(&ccops);
+    zvp_color_cal_init(&g_rt.color_cal, &ccops);
+    int cal_boot_rc = zvp_color_cal_boot_activate(&g_rt.color_cal);
+    zvp_logf("[cal] boot activate rc=%d cap=%d en=%d preset=%u",
+             cal_boot_rc,
+             g_rt.color_cal.factory_captured ? 1 : 0,
+             g_rt.color_cal.enabled ? 1 : 0,
+             (unsigned)g_rt.color_cal.preset_idx);
+
     zvp_input_init(&g_rt.input, c1_code);
     g_rt.native_menu_touch_enabled = true;
     load_prefs_and_apply();
@@ -479,11 +492,32 @@ static void ensure_boot_evaluated_ui_thread(uint64_t now)
              (unsigned)g_rt.sound.count);
 }
 
+#include <unistd.h>
+
 __attribute__((constructor))
 static void zvp_on_preload_init(void)
 {
     memset(&g_rt, 0, sizeof(g_rt));
     g_rt.boot_start_ms = zvp_monotonic_ms();
+
+    /* 仅允许注入相机主进程 im.elf，避免在 /etc/ld.so.preload 或子进程 fork/exec 场景下误触发门禁/看门狗 */
+    char exe_path[256];
+    ssize_t exe_len = readlink("/proc/self/exe", exe_path, sizeof(exe_path) - 1u);
+    if (exe_len <= 0) {
+        g_rt.boot_tripped = true;
+        g_rt.boot_evaluated = true;
+        g_rt.guard_cleared = true;
+        g_rt.plugin_active = false;
+        return;
+    }
+    exe_path[(size_t)exe_len] = '\0';
+    if (!zvp_is_target_im_exe_path(exe_path)) {
+        g_rt.boot_tripped = true;
+        g_rt.boot_evaluated = true;
+        g_rt.guard_cleared = true;
+        g_rt.plugin_active = false;
+        return;
+    }
 
     zvp_boot_guard_state_t bg;
     if (zvp_boot_guard_enter(&s_bg_ops,
@@ -505,6 +539,7 @@ __attribute__((destructor))
 static void zvp_on_process_exit(void)
 {
     g_rt.shutting_down = true;
+    (void)zvp_color_cal_shutdown_reset(&g_rt.color_cal, false);
     zvp_craw_shutdown(&g_rt.craw);
     if (!g_rt.boot_tripped && g_rt.boot_evaluated && !g_rt.guard_cleared) {
         zvp_boot_guard_mark_healthy(&s_bg_ops, ZVP_BOOT_GUARD_PATH);
@@ -523,6 +558,7 @@ void zvp_runtime_handle_action_mask(uint32_t act_mask)
                  g_rt.bridge.canvas_ready ? 1 : 0);
         if (!g_rt.input.menu_visible) {
             (void)zvp_lut_flush_pending_cfg(&g_rt.lut);
+            (void)zvp_color_cal_flush_cfg(&g_rt.color_cal);
             g_rt.lvgl.cur_touch_pressed = false;
             g_rt.tp_head = g_rt.tp_tail;
         }
@@ -530,6 +566,7 @@ void zvp_runtime_handle_action_mask(uint32_t act_mask)
     } else if (act_mask & ZVP_ACT_CLOSE_MENU) {
         zvp_logf("menu_close -> visible=0");
         (void)zvp_lut_flush_pending_cfg(&g_rt.lut);
+        (void)zvp_color_cal_flush_cfg(&g_rt.color_cal);
         g_rt.lvgl.cur_touch_pressed = false;
         g_rt.tp_head = g_rt.tp_tail;
         zvp_ui_set_visible(&g_rt.ui, false);
@@ -739,6 +776,13 @@ void zvp_runtime_on_animate(void)
         (now - g_rt.lut_cfg_dirty_ms) >= 600u) {
         g_rt.lut_cfg_dirty_ms = 0u;
         (void)zvp_lut_flush_pending_cfg(&g_rt.lut);
+    }
+
+    uint32_t prev_cal_reapply = g_rt.color_cal.reapply_count;
+    zvp_color_cal_tick(&g_rt.color_cal, now);
+    if (g_rt.color_cal.reapply_count != prev_cal_reapply) {
+        zvp_logf("[cal] 检测到固件重置 Slot0，已自动重注并刷新 (#%u)",
+                 (unsigned)g_rt.color_cal.reapply_count);
     }
 
     if (g_rt.craw.liro_installed &&

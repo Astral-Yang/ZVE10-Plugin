@@ -7,6 +7,7 @@
 #include "zvp_aspect.h"
 #include "zvp_craw.h"
 #include "zvp_lut.h"
+#include "zvp_color_cal.h"
 #include "zvp_menu_touch.h"
 #include "lvgl.h"
 
@@ -46,6 +47,7 @@ int zvp_bridge_init_platform(zvp_wifi5g_platform_ops_t *out_wifi_ops,
                              zvp_gate_ops_t *out_gate_ops);
 int zvp_bridge_init_craw_ops(zvp_craw_platform_ops_t *out_craw_ops);
 int zvp_bridge_init_lut_ops(zvp_lut_platform_ops_t *out_lut_ops);
+int zvp_bridge_init_color_cal_ops(zvp_color_cal_platform_ops_t *out_ops);
 int zvp_bridge_init_menu_touch_ops(zvp_menu_touch_ops_t *out_ops);
 bool zvp_runtime_should_handle_native_touch(void);
 void zvp_bridge_cleanup_internal_drive_b(void);
@@ -231,6 +233,28 @@ typedef struct zvp_ui {
     lv_obj_t       *btn_lut_fine_reset;
     lv_obj_t       *lut_param_btns[ZVP_LUT_PARAM_COUNT];
     lv_obj_t       *lut_param_vals[ZVP_LUT_PARAM_COUNT];
+
+    /* 屏幕校色全透明预览页控件（左窄操控栏 + 顶部信息步进胶囊 + 底部 1x9 微调磁贴条） */
+    zvp_cal_param_t cal_sel_param;
+    lv_obj_t       *btn_cal_enable;
+    lv_obj_t       *badge_cal_enable;
+    lv_obj_t       *lbl_cal_badge;
+    lv_obj_t       *btn_cal_compare;
+    lv_obj_t       *lbl_cal_compare;
+    lv_obj_t       *btn_cal_preset;
+    lv_obj_t       *lbl_cal_preset;
+    lv_obj_t       *btn_cal_reset;
+    lv_obj_t       *lbl_cal_status;
+
+    lv_obj_t       *cal_top_layer;
+    lv_obj_t       *lbl_cal_top_param;
+    lv_obj_t       *btn_cal_minus;
+    lv_obj_t       *btn_cal_plus;
+
+    lv_obj_t       *cal_fine_layer;
+    lv_obj_t       *cal_param_btns[ZVP_CAL_PARAM_COUNT];
+    lv_obj_t       *cal_param_vals[ZVP_CAL_PARAM_COUNT];
+    lv_obj_t       *btn_cal_fine_reset;
 } zvp_ui_t;
 
 void zvp_ui_build(zvp_ui_t *ui);
@@ -304,6 +328,7 @@ typedef struct zvp_runtime {
     zvp_aspect_ctx_t aspect;
     zvp_craw_ctx_t craw;
     zvp_lut_ctx_t lut;
+    zvp_color_cal_ctx_t color_cal;
     uint32_t lut_last_nonzero_sel;
     uint64_t lut_cfg_dirty_ms;
     bool shutter_sound_enabled;

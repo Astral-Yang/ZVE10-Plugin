@@ -1847,10 +1847,30 @@ static void test_lut_core_and_bundle(void)
     /* MATCH 命中时不应重复上传 18 条 slot */
     assert(g_mock_lut_last_apply_sel == 10u);
 
-    /* 5. 安全关闭与卸载复位应写 sel=0 并触发刷新 */
+    /* 5. 安全关闭与卸载复位应写 sel=0 并触发刷新，且将 active_sel=0 落盘使重启后不恢复旧滤镜 */
     assert(zvp_lut_shutdown_reset(&ctx) == 0);
     assert(ctx.active_sel == 0u);
     assert(g_mock_lut_last_apply_sel == 0u);
+    zvp_lut_init(&ctx, &ops);
+    assert(zvp_lut_boot_activate(&ctx) == 0);
+    assert(ctx.active_sel == 0u);
+    /* 验证即使 kmod 尚未加载，安全复位同样覆盖旧配置 active_sel=0 */
+    assert(zvp_lut_select_slot(&ctx, 10u, true, true) == 0);
+    ctx.kmod_loaded = false;
+    assert(zvp_lut_shutdown_reset(&ctx) == 0);
+    zvp_lut_init(&ctx, &ops);
+    assert(zvp_lut_boot_activate(&ctx) == 0);
+    assert(ctx.active_sel == 0u);
+
+    /* 6. 进程白名单过滤断言（防止误注入 sh/busybox 等非 im.elf 进程） */
+    assert(zvp_is_target_im_exe_path("/usr/bin/im.elf"));
+    assert(zvp_is_target_im_exe_path("im.elf"));
+    assert(!zvp_is_target_im_exe_path("/bin/sh"));
+    assert(!zvp_is_target_im_exe_path("/bin/busybox"));
+    assert(!zvp_is_target_im_exe_path("/usr/bin/bootin.elf"));
+    assert(!zvp_is_target_im_exe_path("/usr/bin/im.elf.bak"));
+    assert(!zvp_is_target_im_exe_path(""));
+    assert(!zvp_is_target_im_exe_path(NULL));
 
     /* 6. 滚到即预览延迟落盘 (persist_cfg=false -> cfg_dirty=true -> flush) */
     g_mock_lut_cfg_disk_len = 0u;
@@ -1970,6 +1990,212 @@ static void test_menu_touch_logic(void)
     assert(zvp_menu_touch_is_enabled());
 }
 
+#include "zvp_color_cal.h"
+
+static uint8_t g_mock_vph_ram[0x1000];
+static uint8_t g_mock_cal_slot0_lut[ZVP_CAL_LUT_BUF_BYTES];
+static uint8_t g_mock_cal_slot0_mtxa[ZVP_CAL_MTXA_BYTES];
+static uint8_t g_mock_cal_dirty_flag = 0u;
+static uint32_t g_mock_cal_dirty_slot = 99u;
+static uint8_t g_mock_cal_cfg_file[64];
+static size_t  g_mock_cal_cfg_len = 0u;
+static bool    g_mock_cal_cfg_exists = false;
+
+static int mock_cal_phys_read(uint32_t pa, void *out_buf, size_t len)
+{
+    (void)g_mock_vph_ram;
+    if (pa >= ZVP_CAL_VPH_PA_SLOT0_LUT &&
+        pa + len <= ZVP_CAL_VPH_PA_SLOT0_LUT + sizeof(g_mock_cal_slot0_lut)) {
+        memcpy(out_buf, g_mock_cal_slot0_lut + (pa - ZVP_CAL_VPH_PA_SLOT0_LUT), len);
+        return 0;
+    }
+    if (pa >= ZVP_CAL_VPH_PA_SLOT0_MTXA &&
+        pa + len <= ZVP_CAL_VPH_PA_SLOT0_MTXA + sizeof(g_mock_cal_slot0_mtxa)) {
+        memcpy(out_buf, g_mock_cal_slot0_mtxa + (pa - ZVP_CAL_VPH_PA_SLOT0_MTXA), len);
+        return 0;
+    }
+    if (pa == ZVP_CAL_VPH_PA_DIRTY_FLAG && len == 1u) {
+        *(uint8_t *)out_buf = g_mock_cal_dirty_flag;
+        return 0;
+    }
+    if (pa == ZVP_CAL_VPH_PA_DIRTY_SLOT && len == 4u) {
+        *(uint32_t *)out_buf = g_mock_cal_dirty_slot;
+        return 0;
+    }
+    return -1;
+}
+
+static int mock_cal_phys_write(uint32_t pa, const void *buf, size_t len)
+{
+    if (pa >= ZVP_CAL_VPH_PA_SLOT0_LUT &&
+        pa + len <= ZVP_CAL_VPH_PA_SLOT0_LUT + sizeof(g_mock_cal_slot0_lut)) {
+        memcpy(g_mock_cal_slot0_lut + (pa - ZVP_CAL_VPH_PA_SLOT0_LUT), buf, len);
+        return 0;
+    }
+    if (pa >= ZVP_CAL_VPH_PA_SLOT0_MTXA &&
+        pa + len <= ZVP_CAL_VPH_PA_SLOT0_MTXA + sizeof(g_mock_cal_slot0_mtxa)) {
+        memcpy(g_mock_cal_slot0_mtxa + (pa - ZVP_CAL_VPH_PA_SLOT0_MTXA), buf, len);
+        return 0;
+    }
+    if (pa == ZVP_CAL_VPH_PA_DIRTY_FLAG && len == 1u) {
+        g_mock_cal_dirty_flag = *(const uint8_t *)buf;
+        return 0;
+    }
+    if (pa == ZVP_CAL_VPH_PA_DIRTY_SLOT && len == 4u) {
+        g_mock_cal_dirty_slot = *(const uint32_t *)buf;
+        return 0;
+    }
+    return -1;
+}
+
+static int mock_cal_read_file(const char *path, void *buf, size_t cap, size_t *out_len)
+{
+    if (!path || strcmp(path, ZVP_CAL_CFG_PATH) != 0 || !g_mock_cal_cfg_exists) {
+        return -2;
+    }
+    if (g_mock_cal_cfg_len > cap) return -7;
+    memcpy(buf, g_mock_cal_cfg_file, g_mock_cal_cfg_len);
+    if (out_len) *out_len = g_mock_cal_cfg_len;
+    return 0;
+}
+
+static int mock_cal_write_file(const char *dir, const char *path, const void *buf, size_t len)
+{
+    (void)dir;
+    if (!path || strcmp(path, ZVP_CAL_CFG_PATH) != 0 || len > sizeof(g_mock_cal_cfg_file)) {
+        return -5;
+    }
+    memcpy(g_mock_cal_cfg_file, buf, len);
+    g_mock_cal_cfg_len = len;
+    g_mock_cal_cfg_exists = true;
+    return 0;
+}
+
+static int mock_cal_remove_file(const char *path)
+{
+    if (path && strcmp(path, ZVP_CAL_CFG_PATH) == 0) {
+        g_mock_cal_cfg_exists = false;
+        g_mock_cal_cfg_len = 0u;
+        return 0;
+    }
+    return -2;
+}
+
+static void init_mock_factory_slot0(void)
+{
+    memset(g_mock_cal_slot0_lut, 0xAA, sizeof(g_mock_cal_slot0_lut));
+    uint16_t id_mtx[9] = { 512, 0, 0, 0, 512, 0, 0, 0, 512 };
+    memcpy(g_mock_cal_slot0_mtxa, id_mtx, sizeof(id_mtx));
+
+    for (uint32_t ch = 0u; ch < 3u; ch++) {
+        uint16_t pts[ZVP_CAL_LUT_POINTS];
+        for (uint32_t i = 0u; i < ZVP_CAL_LUT_POINTS; i++) {
+            pts[i] = (uint16_t)((i == ZVP_CAL_LUT_POINTS - 1u) ? 2047u : (i * 64u));
+        }
+        pts[1] = (uint16_t)(80u + ch * 10u);
+        memcpy(g_mock_cal_slot0_lut + ch * ZVP_CAL_LUT_CH_STRIDE, pts, ZVP_CAL_LUT_CH_BYTES);
+    }
+    g_mock_cal_dirty_flag = 0u;
+    g_mock_cal_dirty_slot = 99u;
+}
+
+static int16_t s11(uint16_t v)
+{
+    return (v & 0x400u) ? (int16_t)((int32_t)(v & 0x7ffu) - 2048) : (int16_t)(v & 0x7ffu);
+}
+
+static void test_color_cal_logic(void)
+{
+    init_mock_factory_slot0();
+    g_mock_cal_cfg_exists = false;
+    g_mock_cal_cfg_len = 0u;
+
+    zvp_color_cal_platform_ops_t ops = {
+        .phys_read         = mock_cal_phys_read,
+        .phys_write        = mock_cal_phys_write,
+        .read_file         = mock_cal_read_file,
+        .atomic_write_file = mock_cal_write_file,
+        .remove_file       = mock_cal_remove_file,
+    };
+
+    zvp_color_cal_ctx_t ctx;
+    zvp_color_cal_init(&ctx, &ops);
+    assert(zvp_color_cal_boot_activate(&ctx) == 0);
+    assert(ctx.factory_captured && !ctx.enabled);
+
+    zvp_cal_hw_payload_t pay;
+    zvp_cal_build_payload(&ctx.factory_slot0, &ctx.params, &pay);
+    assert(memcmp(&pay, &ctx.factory_slot0, sizeof(pay)) == 0);
+
+    assert(zvp_color_cal_step_param(&ctx, ZVP_CAL_PARAM_TEMP, 10, 1000u) == 0);
+    assert(ctx.enabled && !ctx.compare_original && ctx.preset_idx == ZVP_CAL_PRESET_CUSTOM);
+    assert(g_mock_cal_dirty_flag == 1u && g_mock_cal_dirty_slot == 0u);
+    assert(g_mock_cal_slot0_lut[0x44] == 0xAA && g_mock_cal_slot0_lut[0x96] == 0xAA);
+
+    uint16_t cur_mtx[9];
+    memcpy(cur_mtx, g_mock_cal_slot0_mtxa, sizeof(cur_mtx));
+    assert(s11(cur_mtx[ZVP_CAL_HW_CH_R * 3u + ZVP_CAL_HW_CH_R]) > 512);
+    assert(s11(cur_mtx[ZVP_CAL_HW_CH_B * 3u + ZVP_CAL_HW_CH_B]) < 512);
+
+    assert(zvp_color_cal_step_param(&ctx, ZVP_CAL_PARAM_GAMMA, 10, 1100u) == 0);
+    uint16_t ch0_pts[ZVP_CAL_LUT_POINTS];
+    memcpy(ch0_pts, g_mock_cal_slot0_lut, sizeof(ch0_pts));
+    assert(ch0_pts[16] > ctx.factory_slot0.lut_ch[0][16]);
+    assert(ch0_pts[0] == 0u && ch0_pts[32] == 2047u);
+
+    assert(zvp_color_cal_step_param(&ctx, ZVP_CAL_PARAM_SAT, -20, 1200u) == 0);
+    memcpy(cur_mtx, g_mock_cal_slot0_mtxa, sizeof(cur_mtx));
+    assert(s11(cur_mtx[ZVP_CAL_HW_CH_G * 3u + ZVP_CAL_HW_CH_R]) > 0);
+    int32_t white_out_g = s11(cur_mtx[ZVP_CAL_HW_CH_R * 3u + ZVP_CAL_HW_CH_G]) +
+                          s11(cur_mtx[ZVP_CAL_HW_CH_G * 3u + ZVP_CAL_HW_CH_G]) +
+                          s11(cur_mtx[ZVP_CAL_HW_CH_B * 3u + ZVP_CAL_HW_CH_G]);
+    assert(white_out_g >= 500 && white_out_g <= 525);
+
+    assert(zvp_color_cal_toggle_compare(&ctx, 1300u) == 0);
+    assert(ctx.compare_original);
+    memcpy(cur_mtx, g_mock_cal_slot0_mtxa, sizeof(cur_mtx));
+    assert(cur_mtx[0] == 512 && cur_mtx[4] == 512 && cur_mtx[8] == 512);
+    assert(zvp_color_cal_toggle_compare(&ctx, 1400u) == 0);
+    assert(!ctx.compare_original);
+    memcpy(cur_mtx, g_mock_cal_slot0_mtxa, sizeof(cur_mtx));
+    int32_t out_sum_r = s11(cur_mtx[ZVP_CAL_HW_CH_R * 3u + ZVP_CAL_HW_CH_R]) +
+                        s11(cur_mtx[ZVP_CAL_HW_CH_G * 3u + ZVP_CAL_HW_CH_R]) +
+                        s11(cur_mtx[ZVP_CAL_HW_CH_B * 3u + ZVP_CAL_HW_CH_R]);
+    int32_t out_sum_b = s11(cur_mtx[ZVP_CAL_HW_CH_R * 3u + ZVP_CAL_HW_CH_B]) +
+                        s11(cur_mtx[ZVP_CAL_HW_CH_G * 3u + ZVP_CAL_HW_CH_B]) +
+                        s11(cur_mtx[ZVP_CAL_HW_CH_B * 3u + ZVP_CAL_HW_CH_B]);
+    assert(out_sum_r > 512 && out_sum_b < 512);
+
+    zvp_color_cal_tick(&ctx, 1400u + 700u);
+    assert(!ctx.cfg_dirty && g_mock_cal_cfg_exists);
+
+    init_mock_factory_slot0();
+    zvp_color_cal_tick(&ctx, 3000u);
+    assert(ctx.reapply_count == 1u);
+    assert(g_mock_cal_dirty_flag == 1u);
+    memcpy(cur_mtx, g_mock_cal_slot0_mtxa, sizeof(cur_mtx));
+    assert(s11(cur_mtx[ZVP_CAL_HW_CH_G * 3u + ZVP_CAL_HW_CH_R]) > 0);
+
+    init_mock_factory_slot0();
+    zvp_color_cal_ctx_t ctx2;
+    zvp_color_cal_init(&ctx2, &ops);
+    assert(zvp_color_cal_boot_activate(&ctx2) == 0);
+    assert(ctx2.enabled && ctx2.params.vals[ZVP_CAL_PARAM_TEMP] == 10);
+    assert(ctx2.params.vals[ZVP_CAL_PARAM_GAMMA] == 10);
+    assert(ctx2.params.vals[ZVP_CAL_PARAM_SAT] == -20);
+
+    g_mock_cal_cfg_file[sizeof(zvp_cal_cfg_disk_t) - 1u] ^= 0xFFu;
+    zvp_color_cal_ctx_t ctx_bad;
+    zvp_color_cal_init(&ctx_bad, &ops);
+    assert(zvp_color_cal_boot_activate(&ctx_bad) != 0);
+    assert(!ctx_bad.enabled);
+
+    assert(zvp_color_cal_shutdown_reset(&ctx2, true) == 0);
+    assert(!g_mock_cal_cfg_exists && !ctx2.enabled);
+    memcpy(cur_mtx, g_mock_cal_slot0_mtxa, sizeof(cur_mtx));
+    assert(cur_mtx[0] == 512 && cur_mtx[4] == 512 && cur_mtx[8] == 512);
+}
+
 int main(void)
 {
     test_gate_logic();
@@ -1986,6 +2212,7 @@ int main(void)
     test_craw_drainer_and_audio_ring();
     test_lut_core_and_bundle();
     test_menu_touch_logic();
+    test_color_cal_logic();
     printf("[通过] zvp 全部核心逻辑单元测试通过！\n");
     return 0;
 }
