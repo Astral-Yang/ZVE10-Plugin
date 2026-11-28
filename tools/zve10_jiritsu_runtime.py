@@ -101,6 +101,12 @@ class Runtime:
             return subprocess.CompletedProcess(arguments, 0,
                                                "Jiritsu 2.03 双次固件校验、UID=0 与持久会话已就绪\n", "")
         if arguments[0] == "sh":
+            blocked = re.search(r"\b(exit|exec|kill|trap|return)\b", arguments[1] or "")
+            if blocked:
+                raise ValueError(
+                    f"Jiritsu 常驻 shell 拒绝包含整词 {blocked.group(1)!r} 的命令"
+                    "（会被判定为终止/替换 shell）；请改写脚本后再试。"
+                )
             return self.shell(arguments[1])
         if arguments[0] == "put":
             return self.put(arguments[1], arguments[2])

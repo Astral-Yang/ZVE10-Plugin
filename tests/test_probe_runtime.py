@@ -86,6 +86,12 @@ class DeploymentTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0)
         self.assertIn("Jiritsu", result.stdout)
 
+    def test_jiritsu_rejects_shell_commands_that_would_replace_the_shell(self):
+        backend = Mock()
+        with self.assertRaisesRegex(ValueError, "exit"):
+            Runtime(backend, Mock()).run_cam(["sh", "awk '/x/{print $1; exit}'"])
+        backend.command.assert_not_called()
+
     def test_jiritsu_baseline_uses_binary_reads(self):
         backend = Mock(ram="/tmp_network/zve10-test")
         backend.read_path.side_effect = [(0, bytes.fromhex("90 b5 95 b0")), (0, b"\x20")]

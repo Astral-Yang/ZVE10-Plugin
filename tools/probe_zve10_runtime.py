@@ -216,7 +216,7 @@ def cmd_check() -> int:
 
     print("[2/3] 读取运行期进程映射、启动参数与关键目录状态 (只读)...")
     probe_sh = (
-        "PID=$(pidof im.elf || ps | awk '/im\\.elf/{print $1; exit}'); "
+        "PID=$(pidof im.elf); "
         "echo IM_PID=$PID; "
         'if [ -n "$PID" ]; then '
         "  grep -E 'libObj\\.so|libNetService\\.so|CautionConfig\\.so|libbackup\\.so|libInfraFsys\\.so|libzve10plugin\\.so' /proc/$PID/maps || true; "

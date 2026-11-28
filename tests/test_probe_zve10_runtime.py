@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import re
 import struct
 import sys
 import tempfile
@@ -135,6 +136,49 @@ class ProbeRuntimeTests(unittest.TestCase):
             self.assertEqual(rc2, 2)
             self.assertEqual(len(pushed_bad), 2)
             self.assertEqual(pushed_bad[-1], SAMPLE_KEMCO)
+
+    def test_shell_scripts_survive_the_jiritsu_command_guard(self) -> None:
+        """探针下发的 shell 脚本不能包含整词 exit/exec/kill/trap/return（Jiritsu 常驻 shell 会拒绝）。"""
+        banned = re.compile(r"\b(exit|exec|kill|trap|return)\b")
+        captured: list[str] = []
+
+        def fake_run_cam(args, capture: bool = True, timeout: float | None = None):
+            if args[0] == "sh":
+                captured.append(args[1])
+            res = mock.MagicMock()
+            res.returncode = 0
+            res.stderr = ""
+            res.stdout = "connected\n" if args[0] == "doctor" else "IM_PID=123\ncmdline=warm.mode=0\n"
+            return res
+
+        baseline = mock.MagicMock(returncode=0, stderr="",
+                                  stdout="NETSERVICE_BYTES=90b595b0\nCAUTION_BYTES=20\n")
+        with mock.patch.object(probe, "run_cam", side_effect=fake_run_cam), \
+             mock.patch.object(probe, "read_firmware_bytes", return_value=baseline):
+            probe.cmd_check()
+
+        with tempfile.NamedTemporaryFile(suffix=".so") as source:
+            with mock.patch.object(probe, "run_cam", side_effect=fake_run_cam), \
+                 mock.patch.object(probe, "run_verify_abi", return_value=0), \
+                 mock.patch.object(probe, "stage_push_file"):
+                probe.cmd_stage_tmp(source.name)
+
+        # Jiritsu 后端支持的所有探针命令都走 run_cam(["sh", ...])，一并覆盖
+        with mock.patch.object(probe, "run_cam", side_effect=fake_run_cam):
+            probe.cmd_logs()
+            probe.cmd_preload_status()
+            probe.cmd_reset_boot_guard()
+            probe.cmd_enable_preload()
+            probe.cmd_disable_preload()
+            probe.cmd_set_mode("3")
+            probe.cmd_write_dmode("3pd")
+            probe.cmd_write_env_txt("FOO=bar")
+            probe.cmd_rm_env_txt()
+            probe.cmd_kallsyms()
+
+        self.assertTrue(captured)
+        for script in captured:
+            self.assertIsNone(banned.search(script), script)
 
     def test_read_firmware_bytes_has_no_bare_od_dependency(self) -> None:
         captured: list[list[str]] = []
